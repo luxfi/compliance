@@ -1,0 +1,509 @@
+// Copyright 2024-2026 Lux Partners Limited. All rights reserved.
+// Use of this source code is governed by the Apache 2.0
+// license that can be found in the LICENSE file.
+
+package idv
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sort"
+	"testing"
+)
+
+// --- Provider registry ---
+
+func TestGetProviderJumio(t *testing.T) {
+	p, err := GetProvider("jumio", map[string]string{
+		"api_token":  "tok",
+		"api_secret": "sec",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.Name() != "jumio" {
+		t.Fatalf("expected 'jumio', got %q", p.Name())
+	}
+}
+
+func TestGetProviderOnfido(t *testing.T) {
+	p, err := GetProvider("onfido", map[string]string{
+		"api_token": "tok",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.Name() != "onfido" {
+		t.Fatalf("expected 'onfido', got %q", p.Name())
+	}
+}
+
+func TestGetProviderPlaid(t *testing.T) {
+	p, err := GetProvider("plaid", map[string]string{
+		"client_id": "cid",
+		"secret":    "sec",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.Name() != "plaid" {
+		t.Fatalf("expected 'plaid', got %q", p.Name())
+	}
+}
+
+func TestGetProviderUnknown(t *testing.T) {
+	_, err := GetProvider("unknown", nil)
+	if err == nil {
+		t.Fatal("expected error for unknown provider")
+	}
+}
+
+func TestListRegistered(t *testing.T) {
+	names := ListRegistered()
+	if len(names) < 3 {
+		t.Fatalf("expected at least 3 registered factories, got %d", len(names))
+	}
+	sort.Strings(names)
+	expected := []string{"jumio", "onfido", "plaid"}
+	for _, exp := range expected {
+		found := false
+		for _, n := range names {
+			if n == exp {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected %q in registered list", exp)
+		}
+	}
+}
+
+// --- Jumio ---
+
+func TestJumioName(t *testing.T) {
+	j := NewJumio(JumioConfig{})
+	if j.Name() != "jumio" {
+		t.Fatalf("expected 'jumio', got %q", j.Name())
+	}
+}
+
+func TestJumioDefaultBaseURL(t *testing.T) {
+	j := NewJumio(JumioConfig{})
+	if j.cfg.BaseURL != JumioSandboxv4 {
+		t.Fatalf("expected sandbox URL, got %q", j.cfg.BaseURL)
+	}
+}
+
+func TestJumioCustomBaseURL(t *testing.T) {
+	j := NewJumio(JumioConfig{BaseURL: "https://custom.example.com"})
+	if j.cfg.BaseURL != "https://custom.example.com" {
+		t.Fatalf("expected custom URL, got %q", j.cfg.BaseURL)
+	}
+}
+
+func TestJumioInitiateVerification(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/initiate" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"transactionReference": "txn-test-001",
+			"redirectUrl":          "https://verify.jumio.com/abc",
+		})
+	}))
+	defer server.Close()
+
+	j := NewJumio(JumioConfig{
+		BaseURL:   server.URL,
+		APIToken:  "test-token",
+		APISecret: "test-secret",
+	})
+
+	resp, err := j.InitiateVerification(context.Background(), &VerificationRequest{
+		ApplicationID: "app-1",
+		Email:         "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.VerificationID != "txn-test-001" {
+		t.Fatalf("expected 'txn-test-001', got %q", resp.VerificationID)
+	}
+	if resp.Provider != ProviderJumio {
+		t.Fatalf("expected 'jumio', got %q", resp.Provider)
+	}
+	if resp.RedirectURL != "https://verify.jumio.com/abc" {
+		t.Fatalf("unexpected redirect URL: %q", resp.RedirectURL)
+	}
+}
+
+func TestJumioCheckStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/transactions/txn-001" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":             "DONE",
+			"verificationStatus": "APPROVED_VERIFIED",
+		})
+	}))
+	defer server.Close()
+
+	j := NewJumio(JumioConfig{BaseURL: server.URL})
+	result, err := j.CheckStatus(context.Background(), "txn-001")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != StatusApproved {
+		t.Fatalf("expected approved, got %q", result.Status)
+	}
+}
+
+func TestJumioParseWebhookApproved(t *testing.T) {
+	j := NewJumio(JumioConfig{})
+	payload := `{
+		"transactionReference": "txn-001",
+		"customerInternalReference": "app-100",
+		"status": "DONE",
+		"verificationStatus": "APPROVED_VERIFIED",
+		"identityVerification": {"similarity": "MATCH", "validity": true}
+	}`
+
+	event, err := j.ParseWebhook([]byte(payload), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event.Status != StatusApproved {
+		t.Fatalf("expected approved, got %q", event.Status)
+	}
+	if event.VerificationID != "txn-001" {
+		t.Fatalf("expected 'txn-001', got %q", event.VerificationID)
+	}
+	if event.ApplicationID != "app-100" {
+		t.Fatalf("expected 'app-100', got %q", event.ApplicationID)
+	}
+	if len(event.Checks) < 2 {
+		t.Fatal("expected at least 2 checks")
+	}
+	if event.Checks[0].Type != "document" || event.Checks[0].Status != "clear" {
+		t.Fatalf("expected document/clear, got %s/%s", event.Checks[0].Type, event.Checks[0].Status)
+	}
+	if event.Checks[1].Type != "facial_similarity" || event.Checks[1].Status != "MATCH" {
+		t.Fatalf("expected facial_similarity/MATCH, got %s/%s", event.Checks[1].Type, event.Checks[1].Status)
+	}
+}
+
+func TestJumioParseWebhookDeclined(t *testing.T) {
+	cases := []string{
+		"DENIED_FRAUD",
+		"DENIED_UNSUPPORTED_ID_TYPE",
+		"DENIED_UNSUPPORTED_ID_COUNTRY",
+		"ERROR_NOT_READABLE_ID",
+		"NO_ID_UPLOADED",
+	}
+
+	j := NewJumio(JumioConfig{})
+	for _, vs := range cases {
+		t.Run(vs, func(t *testing.T) {
+			payload := fmt.Sprintf(`{
+				"transactionReference": "txn-dec",
+				"customerInternalReference": "app-dec",
+				"status": "FAILED",
+				"verificationStatus": %q
+			}`, vs)
+			event, err := j.ParseWebhook([]byte(payload), nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if event.Status != StatusDeclined {
+				t.Fatalf("expected declined for %s, got %q", vs, event.Status)
+			}
+		})
+	}
+}
+
+func TestJumioParseWebhookPending(t *testing.T) {
+	j := NewJumio(JumioConfig{})
+	event, err := j.ParseWebhook([]byte(`{
+		"transactionReference": "txn-p",
+		"customerInternalReference": "app-p",
+		"status": "PENDING",
+		"verificationStatus": "UNKNOWN"
+	}`), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event.Status != StatusPending {
+		t.Fatalf("expected pending, got %q", event.Status)
+	}
+}
+
+func TestJumioParseWebhookInvalidJSON(t *testing.T) {
+	j := NewJumio(JumioConfig{})
+	_, err := j.ParseWebhook([]byte(`not-json`), nil)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+// --- Onfido ---
+
+func TestOnfidoName(t *testing.T) {
+	o := NewOnfido(OnfidoConfig{})
+	if o.Name() != "onfido" {
+		t.Fatalf("expected 'onfido', got %q", o.Name())
+	}
+}
+
+func TestOnfidoDefaultBaseURL(t *testing.T) {
+	o := NewOnfido(OnfidoConfig{})
+	if o.cfg.BaseURL != OnfidoSandboxAPIv3 {
+		t.Fatalf("expected sandbox URL, got %q", o.cfg.BaseURL)
+	}
+}
+
+func TestOnfidoCheckStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"id":     "check-001",
+			"status": "complete",
+			"result": "clear",
+		})
+	}))
+	defer server.Close()
+
+	o := NewOnfido(OnfidoConfig{BaseURL: server.URL})
+	result, err := o.CheckStatus(context.Background(), "check-001")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != StatusApproved {
+		t.Fatalf("expected approved, got %q", result.Status)
+	}
+}
+
+func TestOnfidoParseWebhookClear(t *testing.T) {
+	o := NewOnfido(OnfidoConfig{})
+	payload := `{
+		"payload": {
+			"resource_type": "check",
+			"action": "check.completed",
+			"object": {
+				"id": "check-001",
+				"status": "complete",
+				"result": "clear",
+				"applicant_id": "app-001"
+			}
+		}
+	}`
+	event, err := o.ParseWebhook([]byte(payload), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event.Status != StatusApproved {
+		t.Fatalf("expected approved, got %q", event.Status)
+	}
+	if event.VerificationID != "check-001" {
+		t.Fatalf("expected 'check-001', got %q", event.VerificationID)
+	}
+}
+
+func TestOnfidoParseWebhookConsider(t *testing.T) {
+	o := NewOnfido(OnfidoConfig{})
+	payload := `{
+		"payload": {
+			"resource_type": "check",
+			"action": "check.completed",
+			"object": {
+				"id": "check-002",
+				"status": "complete",
+				"result": "consider"
+			}
+		}
+	}`
+	event, err := o.ParseWebhook([]byte(payload), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event.Status != StatusDeclined {
+		t.Fatalf("expected declined, got %q", event.Status)
+	}
+}
+
+func TestOnfidoParseWebhookInvalidJSON(t *testing.T) {
+	o := NewOnfido(OnfidoConfig{})
+	_, err := o.ParseWebhook([]byte(`{bad`), nil)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+// --- Plaid ---
+
+func TestPlaidName(t *testing.T) {
+	p := NewPlaid(PlaidConfig{})
+	if p.Name() != "plaid" {
+		t.Fatalf("expected 'plaid', got %q", p.Name())
+	}
+}
+
+func TestPlaidDefaultBaseURL(t *testing.T) {
+	p := NewPlaid(PlaidConfig{})
+	if p.cfg.BaseURL != PlaidSandbox {
+		t.Fatalf("expected sandbox URL, got %q", p.cfg.BaseURL)
+	}
+}
+
+func TestPlaidCheckStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "success",
+			"steps": map[string]string{
+				"verify_sms":                "success",
+				"documentary_verification":  "success",
+				"selfie_check":              "success",
+				"kyc_check":                 "success",
+				"risk_check":                "success",
+			},
+		})
+	}))
+	defer server.Close()
+
+	p := NewPlaid(PlaidConfig{BaseURL: server.URL, ClientID: "test", Secret: "test"})
+	result, err := p.CheckStatus(context.Background(), "idv-001")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != StatusApproved {
+		t.Fatalf("expected approved, got %q", result.Status)
+	}
+	if len(result.Checks) != 4 {
+		t.Fatalf("expected 4 checks, got %d", len(result.Checks))
+	}
+}
+
+func TestPlaidParseWebhookStepCompleted(t *testing.T) {
+	p := NewPlaid(PlaidConfig{})
+	payload := `{
+		"webhook_type": "IDENTITY_VERIFICATION",
+		"webhook_code": "STEP_COMPLETED",
+		"identity_verification_id": "idv-step-001"
+	}`
+	event, err := p.ParseWebhook([]byte(payload), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event.Status != StatusPending {
+		t.Fatalf("expected pending, got %q", event.Status)
+	}
+}
+
+func TestPlaidParseWebhookExpired(t *testing.T) {
+	p := NewPlaid(PlaidConfig{})
+	payload := `{
+		"webhook_type": "IDENTITY_VERIFICATION",
+		"webhook_code": "VERIFICATION_EXPIRED",
+		"identity_verification_id": "idv-exp-001"
+	}`
+	event, err := p.ParseWebhook([]byte(payload), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event.Status != StatusExpired {
+		t.Fatalf("expected expired, got %q", event.Status)
+	}
+}
+
+func TestPlaidParseWebhookCompleted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "success"})
+	}))
+	defer server.Close()
+
+	p := NewPlaid(PlaidConfig{BaseURL: server.URL, ClientID: "test", Secret: "test"})
+	payload := `{
+		"webhook_type": "IDENTITY_VERIFICATION",
+		"webhook_code": "VERIFICATION_COMPLETED",
+		"identity_verification_id": "idv-done-001"
+	}`
+	event, err := p.ParseWebhook([]byte(payload), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event.Status != StatusApproved {
+		t.Fatalf("expected approved, got %q", event.Status)
+	}
+}
+
+func TestPlaidParseWebhookCompletedFailed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "failed"})
+	}))
+	defer server.Close()
+
+	p := NewPlaid(PlaidConfig{BaseURL: server.URL, ClientID: "test", Secret: "test"})
+	payload := `{
+		"webhook_type": "IDENTITY_VERIFICATION",
+		"webhook_code": "VERIFICATION_COMPLETED",
+		"identity_verification_id": "idv-fail-001"
+	}`
+	event, err := p.ParseWebhook([]byte(payload), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event.Status != StatusDeclined {
+		t.Fatalf("expected declined, got %q", event.Status)
+	}
+}
+
+func TestPlaidParseWebhookInvalidJSON(t *testing.T) {
+	p := NewPlaid(PlaidConfig{})
+	_, err := p.ParseWebhook([]byte(`not valid`), nil)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+// --- Status constants ---
+
+func TestStatusConstants(t *testing.T) {
+	if StatusPending != "pending" {
+		t.Fatalf("StatusPending = %q", StatusPending)
+	}
+	if StatusApproved != "approved" {
+		t.Fatalf("StatusApproved = %q", StatusApproved)
+	}
+	if StatusDeclined != "declined" {
+		t.Fatalf("StatusDeclined = %q", StatusDeclined)
+	}
+	if StatusExpired != "expired" {
+		t.Fatalf("StatusExpired = %q", StatusExpired)
+	}
+	if StatusError != "error" {
+		t.Fatalf("StatusError = %q", StatusError)
+	}
+}
+
+func TestNewID(t *testing.T) {
+	id1 := newID()
+	id2 := newID()
+	if id1 == id2 {
+		t.Fatal("expected unique IDs")
+	}
+	if len(id1) != 32 {
+		t.Fatalf("expected 32-char hex ID, got %d chars", len(id1))
+	}
+}
