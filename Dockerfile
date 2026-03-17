@@ -1,14 +1,11 @@
 # syntax=docker/dockerfile:1
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.1-alpine AS builder
 
-RUN apk add --no-cache git ca-certificates
-
-ARG GITHUB_TOKEN
-RUN git config --global url."https://${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
-ENV GOPRIVATE=github.com/luxfi/*,github.com/hanzoai/*
+RUN apk add --no-cache ca-certificates
 
 WORKDIR /app
-COPY go.mod go.sum ./
+COPY go.mod ./
+COPY go.sum* ./
 RUN go mod download
 COPY . .
 
