@@ -1,0 +1,13 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--platform=linux/amd64'
+      - '-t'
+      - 'us-docker.pkg.dev/$PROJECT_ID/backend/compliance:next'
+      - '.'
+    env:
+      - 'DOCKER_BUILDKIT=1'
+images:
+  - 'us-docker.pkg.dev/$PROJECT_ID/backend/compliance:next'
+timeout: '600s'

@@ -1,0 +1,11 @@
+.gcloudignore
+.git
+.gitignore
+cloudbuild.yaml
+bin/
+*.exe
+*.test
+*.out
+.env
+LLM.md
+Makefile
