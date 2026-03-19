@@ -56,6 +56,10 @@ type VerificationRequest struct {
 	TaxID     string `json:"tax_id,omitempty"`
 	TaxIDType string `json:"tax_id_type,omitempty"` // ssn, itin, ein
 
+	// Document verification (for sync ID card checks via IAM)
+	DocumentType string `json:"document_type,omitempty"` // passport, drivers_license, id_card
+	DocumentID   string `json:"document_id,omitempty"`   // document number
+
 	// Provider-specific overrides
 	Provider string `json:"provider,omitempty"` // jumio, onfido, plaid
 	Workflow string `json:"workflow,omitempty"` // provider-specific workflow ID
