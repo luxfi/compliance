@@ -7,8 +7,10 @@ package kyc
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -115,6 +117,43 @@ type Document struct {
 	MimeType   string    `json:"mime_type,omitempty"`
 	Status     string    `json:"status,omitempty"` // uploaded, verified, rejected
 	UploadedAt time.Time `json:"uploaded_at"`
+}
+
+// MaskedTaxID returns the TaxID with all but the last 4 characters redacted.
+// For a 9-digit SSN "123456789", it returns "***-**-6789".
+// For shorter or empty values it returns "****".
+func (a *Application) MaskedTaxID() string {
+	if a.TaxID == "" {
+		return ""
+	}
+	// Strip non-alphanumeric for uniform handling
+	digits := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, a.TaxID)
+	if len(digits) <= 4 {
+		return "****"
+	}
+	last4 := digits[len(digits)-4:]
+	return "***-**-" + last4
+}
+
+// SanitizedCopy returns a shallow copy of the Application with TaxID masked.
+// Use this before serializing to logs, API responses, etc.
+func (a *Application) SanitizedCopy() Application {
+	cp := *a
+	cp.TaxID = a.MaskedTaxID()
+	return cp
+}
+
+// MarshalJSON implements json.Marshaler to redact TaxID in serialized output.
+func (a Application) MarshalJSON() ([]byte, error) {
+	type Alias Application
+	sanitized := Alias(a)
+	sanitized.TaxID = a.MaskedTaxID()
+	return json.Marshal(sanitized)
 }
 
 // Store is the application persistence layer.
@@ -226,6 +265,8 @@ func (s *Store) Count() int {
 
 func newID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand: " + err.Error())
+	}
 	return hex.EncodeToString(b)
 }

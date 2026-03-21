@@ -214,12 +214,20 @@ func (e *ComplianceEngine) validate(ctx context.Context, req *PaymentRequest) (*
 		Name: "Sanctions Screening",
 	}
 	if e.screening != nil {
-		screenResult := e.screenCounterparties(ctx, req)
-		if screenResult != "" {
+		screenHit, screenErr := e.screenCounterparties(ctx, req)
+		if screenErr != nil {
+			// Screening failed — cannot confirm clean, default to manual review
 			screenRule.Passed = false
-			screenRule.Detail = screenResult
+			screenRule.Detail = screenErr.Error()
+			if result.Decision == DecisionApprove {
+				result.Decision = DecisionReview
+			}
+			result.Warnings = append(result.Warnings, screenErr.Error())
+		} else if screenHit != "" {
+			screenRule.Passed = false
+			screenRule.Detail = screenHit
 			result.Decision = DecisionDecline
-			result.Reasons = append(result.Reasons, screenResult)
+			result.Reasons = append(result.Reasons, screenHit)
 		} else {
 			screenRule.Passed = true
 		}
@@ -296,7 +304,7 @@ func (e *ComplianceEngine) applyTravelRule(req *PaymentRequest, limits *regulato
 	return tr
 }
 
-func (e *ComplianceEngine) screenCounterparties(ctx context.Context, req *PaymentRequest) string {
+func (e *ComplianceEngine) screenCounterparties(ctx context.Context, req *PaymentRequest) (string, error) {
 	names := []string{}
 	if req.OriginatorName != "" {
 		names = append(names, req.OriginatorName)
@@ -312,13 +320,13 @@ func (e *ComplianceEngine) screenCounterparties(ctx context.Context, req *Paymen
 			FamilyName: parts[1],
 		})
 		if err != nil {
-			continue
+			return "", fmt.Errorf("screening error for %q: %w", name, err)
 		}
 		if !result.Clear {
-			return fmt.Sprintf("Sanctions match found for %q (risk: %s)", name, result.Risk)
+			return fmt.Sprintf("Sanctions match found for %q (risk: %s)", name, result.Risk), nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 func splitName(full string) [2]string {

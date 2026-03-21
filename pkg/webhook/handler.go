@@ -218,6 +218,8 @@ func (h *Handler) ProcessedCount() int {
 
 func newWebhookID() string {
 	b := make([]byte, 12)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand: " + err.Error())
+	}
 	return "wh_" + hex.EncodeToString(b)
 }

@@ -343,8 +343,13 @@ func (s *ScreeningService) assessRisk(matches []ScreeningMatch) RiskLevel {
 	return RiskLow
 }
 
-// normalize lowercases and strips non-alpha chars for comparison.
+// normalize lowercases, replaces hyphens with spaces, strips non-alpha chars,
+// and collapses whitespace for comparison. This ensures "Al-Qaeda" and "Al Qaeda"
+// normalize identically.
 func normalize(s string) string {
+	// Replace hyphens with spaces before stripping non-letter chars so that
+	// hyphenated names like "Al-Qaeda" match "Al Qaeda".
+	s = strings.ReplaceAll(s, "-", " ")
 	var b strings.Builder
 	for _, r := range strings.ToLower(s) {
 		if unicode.IsLetter(r) || unicode.IsSpace(r) {
@@ -423,6 +428,8 @@ func min3(a, b, c int) int {
 
 func newScreeningID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand: " + err.Error())
+	}
 	return "scr_" + hex.EncodeToString(b)
 }

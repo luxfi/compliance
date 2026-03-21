@@ -322,7 +322,7 @@ func TestNormalize(t *testing.T) {
 	}{
 		{"John Doe", "john doe"},
 		{"JOHN  DOE", "john doe"},
-		{"John-Doe", "johndoe"},
+		{"John-Doe", "john doe"},
 		{"John  O'Brien ", "john obrien"},
 	}
 	for _, tc := range cases {
