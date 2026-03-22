@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -505,5 +506,265 @@ func TestNewID(t *testing.T) {
 	}
 	if len(id1) != 32 {
 		t.Fatalf("expected 32-char hex ID, got %d chars", len(id1))
+	}
+}
+
+// --- Provider registry: additional coverage ---
+
+func TestRegisterFactoryOverwrite(t *testing.T) {
+	// Register a custom factory, then overwrite it
+	customCalled := false
+	RegisterFactory("custom-test-provider", func(config map[string]string) (Provider, error) {
+		customCalled = true
+		return NewJumio(JumioConfig{BaseURL: config["base_url"]}), nil
+	})
+
+	p, err := GetProvider("custom-test-provider", map[string]string{"base_url": "https://example.com"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !customCalled {
+		t.Fatal("custom factory should have been called")
+	}
+	if p == nil {
+		t.Fatal("expected non-nil provider")
+	}
+
+	// Overwrite with a different factory
+	overwriteCalled := false
+	RegisterFactory("custom-test-provider", func(config map[string]string) (Provider, error) {
+		overwriteCalled = true
+		return NewOnfido(OnfidoConfig{}), nil
+	})
+
+	p2, err := GetProvider("custom-test-provider", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !overwriteCalled {
+		t.Fatal("overwritten factory should have been called")
+	}
+	if p2.Name() != "onfido" {
+		t.Fatalf("expected onfido from overwritten factory, got %q", p2.Name())
+	}
+
+	// Clean up: re-register nothing to avoid polluting other tests
+	// (not strictly necessary since test factories don't conflict with init ones)
+}
+
+func TestGetProviderWithNilConfig(t *testing.T) {
+	// All init-registered providers should handle nil config gracefully
+	for _, name := range []string{"jumio", "onfido", "plaid"} {
+		p, err := GetProvider(name, nil)
+		if err != nil {
+			t.Fatalf("GetProvider(%q, nil): unexpected error: %v", name, err)
+		}
+		if p.Name() != name {
+			t.Fatalf("expected %q, got %q", name, p.Name())
+		}
+	}
+}
+
+func TestGetProviderErrorMessage(t *testing.T) {
+	_, err := GetProvider("nonexistent-provider-xyz", nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "nonexistent-provider-xyz") {
+		t.Fatalf("error should mention provider name, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("error should say 'not registered', got: %v", err)
+	}
+}
+
+func TestRegisterFactoryReturningError(t *testing.T) {
+	RegisterFactory("failing-factory", func(config map[string]string) (Provider, error) {
+		return nil, fmt.Errorf("config validation failed: missing api_key")
+	})
+
+	_, err := GetProvider("failing-factory", nil)
+	if err == nil {
+		t.Fatal("expected error from failing factory")
+	}
+	if !strings.Contains(err.Error(), "config validation failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// --- Verification request field coverage ---
+
+func TestVerificationRequestFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"transactionReference": "txn-fields-001",
+			"redirectUrl":          "https://verify.example.com/test",
+		})
+	}))
+	defer server.Close()
+
+	j := NewJumio(JumioConfig{
+		BaseURL:   server.URL,
+		APIToken:  "tok",
+		APISecret: "sec",
+	})
+
+	// Test with all optional fields populated
+	resp, err := j.InitiateVerification(context.Background(), &VerificationRequest{
+		ApplicationID: "app-full",
+		GivenName:     "John",
+		FamilyName:    "Doe",
+		DateOfBirth:   "1990-01-15",
+		Email:         "john@example.com",
+		Phone:         "+1-555-0100",
+		Country:       "US",
+		IPAddress:     "192.168.1.1",
+		Street:        []string{"123 Main St", "Apt 4"},
+		City:          "San Francisco",
+		State:         "CA",
+		PostalCode:    "94102",
+		TaxID:         "123-45-6789",
+		TaxIDType:     "ssn",
+		DocumentType:  "passport",
+		DocumentID:    "P123456",
+		Provider:      "jumio",
+		Workflow:      "wf-001",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.VerificationID != "txn-fields-001" {
+		t.Fatalf("expected txn-fields-001, got %q", resp.VerificationID)
+	}
+	if resp.Status != StatusPending {
+		t.Fatalf("expected pending, got %q", resp.Status)
+	}
+}
+
+// --- Jumio edge cases ---
+
+func TestJumioInitiateVerificationHTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error": "internal server error"}`))
+	}))
+	defer server.Close()
+
+	j := NewJumio(JumioConfig{BaseURL: server.URL, APIToken: "tok", APISecret: "sec"})
+	_, err := j.InitiateVerification(context.Background(), &VerificationRequest{
+		ApplicationID: "app-err",
+		Email:         "err@example.com",
+	})
+	if err == nil {
+		t.Fatal("expected error for HTTP 500")
+	}
+}
+
+func TestJumioCheckStatusHTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	j := NewJumio(JumioConfig{BaseURL: server.URL})
+	_, err := j.CheckStatus(context.Background(), "txn-notfound")
+	if err == nil {
+		t.Fatal("expected error for HTTP 404")
+	}
+}
+
+// --- Onfido edge cases ---
+
+func TestOnfidoInitiateVerification(t *testing.T) {
+	// Mock: create applicant then create check
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "checks") {
+			json.NewEncoder(w).Encode(map[string]string{
+				"id":     "chk-001",
+				"status": "in_progress",
+			})
+		} else {
+			json.NewEncoder(w).Encode(map[string]string{
+				"id": "applicant-001",
+			})
+		}
+	}))
+	defer server.Close()
+
+	o := NewOnfido(OnfidoConfig{BaseURL: server.URL, APIToken: "tok"})
+	resp, err := o.InitiateVerification(context.Background(), &VerificationRequest{
+		ApplicationID: "app-onfido",
+		GivenName:     "Jane",
+		FamilyName:    "Doe",
+		Email:         "jane@example.com",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Provider != ProviderOnfido {
+		t.Fatalf("expected onfido, got %q", resp.Provider)
+	}
+	if resp.Status != StatusPending {
+		t.Fatalf("expected pending, got %q", resp.Status)
+	}
+}
+
+// --- Plaid edge cases ---
+
+func TestPlaidInitiateVerification(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":             "idv-plaid-001",
+			"shareable_url":  "https://plaid.com/verify/abc",
+			"status":         "active",
+		})
+	}))
+	defer server.Close()
+
+	p := NewPlaid(PlaidConfig{BaseURL: server.URL, ClientID: "cid", Secret: "sec"})
+	resp, err := p.InitiateVerification(context.Background(), &VerificationRequest{
+		ApplicationID: "app-plaid",
+		GivenName:     "Bob",
+		FamilyName:    "Smith",
+		Email:         "bob@example.com",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Provider != ProviderPlaid {
+		t.Fatalf("expected plaid, got %q", resp.Provider)
+	}
+}
+
+// --- Provider constant coverage ---
+
+func TestProviderNameConstants(t *testing.T) {
+	if ProviderJumio != "jumio" {
+		t.Fatalf("ProviderJumio = %q", ProviderJumio)
+	}
+	if ProviderOnfido != "onfido" {
+		t.Fatalf("ProviderOnfido = %q", ProviderOnfido)
+	}
+	if ProviderPlaid != "plaid" {
+		t.Fatalf("ProviderPlaid = %q", ProviderPlaid)
+	}
+}
+
+func TestListRegisteredContainsAllInit(t *testing.T) {
+	names := ListRegistered()
+	nameSet := make(map[string]bool)
+	for _, n := range names {
+		nameSet[n] = true
+	}
+
+	for _, expected := range []string{ProviderJumio, ProviderOnfido, ProviderPlaid} {
+		if !nameSet[expected] {
+			t.Errorf("ListRegistered() missing %q", expected)
+		}
 	}
 }
