@@ -1,6 +1,8 @@
 package aml
 
-// DefaultMonitoringRules returns the standard AML monitoring rules mandated
+import "time"
+
+// DefaultMonitoringRules returns the 3 standard AML monitoring rules mandated
 // by FinCEN regulations. Any ATS, BD, or TA should install these as a baseline.
 //
 //   - CTR threshold: Flag transactions over $10,000 (31 CFR 1010.311)
@@ -14,6 +16,7 @@ func DefaultMonitoringRules() []Rule {
 			ThresholdAmount: 10000,
 			Currency:        "USD",
 			Enabled:         true,
+			Severity:        SeverityHigh,
 			Description:     "Flag transactions over $10,000 (CTR threshold per 31 CFR 1010.311)",
 		},
 		{
@@ -22,6 +25,7 @@ func DefaultMonitoringRules() []Rule {
 			ThresholdAmount: 9000,
 			Currency:        "USD",
 			Enabled:         true,
+			Severity:        SeverityHigh,
 			Description:     "Detect potential structuring ($9,000-$9,999 per 31 USC 5324)",
 		},
 		{
@@ -30,8 +34,9 @@ func DefaultMonitoringRules() []Rule {
 			ThresholdAmount: 50000,
 			Currency:        "USD",
 			MaxCount:        100,
-			Window:          24 * 60 * 60 * 1e9, // 24 hours in nanoseconds
+			Window:          24 * time.Hour,
 			Enabled:         true,
+			Severity:        SeverityMedium,
 			Description:     "Block if 24h volume exceeds $50,000 without enhanced KYC",
 		},
 	}

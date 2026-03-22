@@ -67,3 +67,11 @@ func TestDefaultRulesAllUSD(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaultRulesHaveSeverity(t *testing.T) {
+	for _, r := range DefaultMonitoringRules() {
+		if r.Severity == "" {
+			t.Fatalf("default rule %s should have a severity", r.ID)
+		}
+	}
+}
