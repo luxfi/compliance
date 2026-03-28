@@ -8,9 +8,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,12 +39,7 @@ func main() {
 	listen := envOr("COMPLIANCE_LISTEN", ":8091")
 	apiKey := os.Getenv("COMPLIANCE_API_KEY")
 	if apiKey == "" {
-		b := make([]byte, 32)
-		if _, err := rand.Read(b); err != nil {
-			logger.Fatalf("FATAL: failed to generate random API key: %v", err)
-		}
-		apiKey = hex.EncodeToString(b)
-		logger.Printf("WARNING: COMPLIANCE_API_KEY not set — generated random key: %s", apiKey)
+		logger.Fatal("COMPLIANCE_API_KEY environment variable is required — provision via KMS")
 	}
 	defaultProvider := envOr("KYC_DEFAULT_PROVIDER", "jumio")
 
@@ -280,12 +273,56 @@ func main() {
 				writeError(w, http.StatusNotFound, err.Error())
 				return
 			}
-			// Decode partial update on top of existing
-			if err := decodeBody(r, existing); err != nil {
+			// Reject PATCH on terminal states (approved, rejected, pending).
+			switch existing.Status {
+			case kyc.StatusApproved, kyc.StatusRejected, kyc.StatusPending:
+				writeError(w, http.StatusConflict, fmt.Sprintf("cannot modify application in %s state", existing.Status))
+				return
+			}
+			// Whitelist patchable fields — never allow status, kyc_status,
+			// reviewed_by, or other privileged fields via PATCH.
+			var patch struct {
+				GivenName   string `json:"given_name"`
+				FamilyName  string `json:"family_name"`
+				Email       string `json:"email"`
+				Phone       string `json:"phone"`
+				DateOfBirth string `json:"date_of_birth"`
+				City        string `json:"city"`
+				State       string `json:"state"`
+				PostalCode  string `json:"postal_code"`
+				Country     string `json:"country"`
+			}
+			if err := decodeBody(r, &patch); err != nil {
 				writeError(w, http.StatusBadRequest, err.Error())
 				return
 			}
-			existing.ID = appID // prevent ID override
+			if patch.GivenName != "" {
+				existing.GivenName = patch.GivenName
+			}
+			if patch.FamilyName != "" {
+				existing.FamilyName = patch.FamilyName
+			}
+			if patch.Email != "" {
+				existing.Email = patch.Email
+			}
+			if patch.Phone != "" {
+				existing.Phone = patch.Phone
+			}
+			if patch.DateOfBirth != "" {
+				existing.DateOfBirth = patch.DateOfBirth
+			}
+			if patch.City != "" {
+				existing.City = patch.City
+			}
+			if patch.State != "" {
+				existing.State = patch.State
+			}
+			if patch.PostalCode != "" {
+				existing.PostalCode = patch.PostalCode
+			}
+			if patch.Country != "" {
+				existing.Country = patch.Country
+			}
 			if err := appStore.Update(existing); err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
@@ -436,6 +473,8 @@ func main() {
 
 	// --- Middleware stack ---
 	var handler http.Handler = mux
+	// Request body size limit — 1MB max to prevent abuse.
+	handler = maxBodySizeMiddleware(1<<20, handler)
 	handler = loggingMiddleware(logger, handler)
 	handler = apiKeyMiddleware(apiKey, handler)
 
@@ -516,6 +555,14 @@ func (rw *responseWriter) WriteHeader(code int) {
 		rw.wrote = true
 	}
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+// maxBodySizeMiddleware limits request body size to prevent denial-of-service.
+func maxBodySizeMiddleware(maxBytes int64, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+		next.ServeHTTP(w, r)
+	})
 }
 
 // --- Helpers ---

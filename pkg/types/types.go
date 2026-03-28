@@ -117,7 +117,8 @@ type BusinessKYB struct {
 	ID         string     `json:"id"`
 	BusinessID string     `json:"business_id"`
 	Name       string     `json:"name"`
-	EIN        string     `json:"ein"`
+	EIN        string     `json:"-"`                    // never serialized — use EINLast4 for display
+	EINLast4   string     `json:"ein_last4,omitempty"`  // last 4 digits for display only
 	Status     KYBStatus  `json:"status"`
 	Documents  []Document `json:"documents,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
