@@ -3,9 +3,19 @@ package rbac
 
 import "github.com/luxfi/compliance/pkg/types"
 
+// AllModules returns the canonical list of compliance modules.
+// Used by seed data and RBAC role definitions to prevent drift.
+func AllModules() []string {
+	return []string{
+		"kyc", "aml", "applications", "pipelines", "sessions",
+		"funds", "esign", "roles", "users", "transactions",
+		"reports", "settings", "credentials", "billing", "dashboard",
+	}
+}
+
 // DefaultRoles returns the standard set of compliance roles.
 func DefaultRoles() []*types.Role {
-	allModules := []string{"kyc", "aml", "applications", "funds", "esign", "pipelines", "sessions", "roles", "dashboard", "transactions"}
+	allModules := AllModules()
 	allActions := []string{"read", "write", "delete", "admin"}
 
 	// Owner -- full access to everything.

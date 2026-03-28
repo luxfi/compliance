@@ -17,8 +17,8 @@ func TestNewClientDefaults(t *testing.T) {
 	}
 	defer c.Close()
 
-	if c.baseURL != DefaultBaseURL {
-		t.Fatalf("baseURL = %q, want %q", c.baseURL, DefaultBaseURL)
+	if c.baseURL != "https://jube:5001" {
+		t.Fatalf("baseURL = %q, want %q", c.baseURL, "https://jube:5001")
 	}
 	if c.httpClient.Timeout != DefaultTimeout {
 		t.Fatalf("timeout = %v, want %v", c.httpClient.Timeout, DefaultTimeout)
