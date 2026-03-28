@@ -5,8 +5,8 @@ RUN apk add --no-cache ca-certificates
 
 WORKDIR /app
 COPY go.mod ./
-COPY go.sum* ./
-RUN go mod download
+COPY go.sum* .
+RUN [ -f go.sum ] && go mod download || true
 COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o complianced ./cmd/complianced/
