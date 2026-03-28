@@ -12,7 +12,8 @@ import (
 )
 
 // DefaultBaseURL is the default Jube sidecar address.
-const DefaultBaseURL = "http://jube:5001"
+// Uses HTTPS by default. For plaintext HTTP, set JUBE_URL explicitly.
+const DefaultBaseURL = "https://jube:5001"
 
 // DefaultTimeout is the HTTP request timeout for Jube API calls.
 const DefaultTimeout = 10 * time.Second
@@ -29,12 +30,23 @@ type Client struct {
 	httpClient *http.Client
 }
 
-// New creates a new Jube client.
+// New creates a new Jube client. The base URL is validated to ensure it uses
+// http or https schemes to prevent SSRF via file:// or other schemes.
 func New(cfg Config) (*Client, error) {
 	baseURL := cfg.BaseURL
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
 	}
+
+	// Validate base URL scheme to prevent SSRF.
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("jube: invalid base URL: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, fmt.Errorf("jube: base URL must use http or https scheme, got %q", parsed.Scheme)
+	}
+
 	timeout := cfg.Timeout
 	if timeout == 0 {
 		timeout = DefaultTimeout
@@ -152,6 +164,10 @@ func (c *Client) get(ctx context.Context, path string, dst interface{}) error {
 	return c.doJSON(req, dst)
 }
 
+// maxResponseBody is the maximum response body size from Jube (5 MB).
+// Prevents memory exhaustion if the sidecar returns an unexpectedly large response.
+const maxResponseBody = 5 * 1024 * 1024
+
 // doJSON executes an HTTP request and decodes the JSON response into dst.
 func (c *Client) doJSON(req *http.Request, dst interface{}) error {
 	resp, err := c.httpClient.Do(req)
@@ -160,13 +176,16 @@ func (c *Client) doJSON(req *http.Request, dst interface{}) error {
 	}
 	defer resp.Body.Close()
 
+	// Limit response body reads to prevent memory exhaustion.
+	limited := io.LimitReader(resp.Body, maxResponseBody)
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(limited)
 		return fmt.Errorf("http %s %s: status %d: %s", req.Method, req.URL.Path, resp.StatusCode, string(body))
 	}
 
 	if dst != nil {
-		if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
+		if err := json.NewDecoder(limited).Decode(dst); err != nil {
 			return fmt.Errorf("decode response: %w", err)
 		}
 	}
