@@ -4,9 +4,7 @@ FROM golang:1.26.1-alpine AS builder
 RUN apk add --no-cache ca-certificates
 
 WORKDIR /app
-COPY go.mod ./
-COPY go.sum* .
-RUN [ -f go.sum ] && go mod download || true
+COPY go.mod go.sum ./
 COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o complianced ./cmd/complianced/
