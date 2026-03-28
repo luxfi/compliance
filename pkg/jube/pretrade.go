@@ -3,95 +3,190 @@ package jube
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"time"
-
-	cextypes "github.com/luxfi/cex/pkg/types"
 )
 
-// PreTradeScreen adapts the Jube client into a CEX engine PreTradeCheck.
+// PreTradeAction describes what the broker should do with the order.
+type PreTradeAction string
+
+const (
+	PreTradeAllow  PreTradeAction = "allow"
+	PreTradeBlock  PreTradeAction = "block"
+	PreTradeReview PreTradeAction = "review"
+)
+
+// PreTradeConfig controls how the Jube pre-trade screen behaves.
+type PreTradeConfig struct {
+	// ModelID is the Jube EntityAnalysisModel to invoke.
+	ModelID int
+
+	// AllowOnReview controls whether orders flagged "review" are allowed
+	// to proceed (true) or held (false). Default: true (allow, flag async).
+	AllowOnReview bool
+
+	// AllowOnError controls whether orders proceed if Jube is unreachable.
+	// Default: true (fail-open). Set false for fail-closed.
+	AllowOnError bool
+
+	// WebhookURL is the target for aml.flagged webhook events. Empty = no webhook.
+	WebhookURL string
+
+	// WebhookHMACSecret is the HMAC-SHA256 secret for signing webhooks.
+	// Must come from KMS, never hardcoded.
+	WebhookHMACSecret string
+}
+
+// PreTradeResult is the outcome of a Jube AML screen on an order.
+type PreTradeResult struct {
+	Action   PreTradeAction `json:"action"`
+	Allowed  bool           `json:"allowed"`
+	Score    float64        `json:"score"`
+	Alerts   []Alert        `json:"alerts,omitempty"`
+	Errors   []string       `json:"errors,omitempty"`
+	Warnings []string       `json:"warnings,omitempty"`
+}
+
+// PreTradeScreen wraps a Jube client and provides pre-trade AML screening
+// for the broker's order flow. Call Screen() before executing any trade.
 type PreTradeScreen struct {
 	client *Client
+	cfg    PreTradeConfig
 }
 
-// NewPreTradeScreen creates a pre-trade compliance screen backed by Jube.
-func NewPreTradeScreen(client *Client) *PreTradeScreen {
-	return &PreTradeScreen{client: client}
-}
-
-// Check returns a function compatible with engine.AddPreTradeCheck.
-// It sends the order to Jube for real-time AML/fraud scoring.
-// If Jube blocks the transaction (ResponseElevation >= 3), the order is rejected.
-// If Jube is unreachable and FailOpen is true, the order is allowed through.
-func (s *PreTradeScreen) Check() func(ctx context.Context, order *cextypes.Order) error {
-	return func(ctx context.Context, order *cextypes.Order) error {
-		// Build Jube transaction from order
-		var amount string
-		if order.Qty != "" && order.LimitPrice != "" {
-			qty, _ := strconv.ParseFloat(order.Qty, 64)
-			price, _ := strconv.ParseFloat(order.LimitPrice, 64)
-			if qty > 0 && price > 0 {
-				amount = fmt.Sprintf("%.2f", qty*price)
-			}
-		}
-		if amount == "" && order.Notional != "" {
-			amount = order.Notional
-		}
-		if amount == "" {
-			amount = "0"
-		}
-
-		tx := &Transaction{
-			AccountID:      order.AccountID,
-			TxnID:          order.ID,
-			TxnDateTime:    time.Now().UTC().Format("2006-01-02T15:04:05.000"),
-			Currency:       "USD",
-			CurrencyAmount: amount,
-			AmountUSD:      amount,
-			ServiceCode:    "TRADE",
-			ChannelID:      "ATS",
-			OrderID:        order.ID,
-		}
-
-		resp, err := s.client.Screen(ctx, tx)
-		if err != nil {
-			if s.client.FailOpen() {
-				// Allow through — in-process AML rules still apply as fallback
-				return nil
-			}
-			return fmt.Errorf("jube pre-trade screen unavailable: %w", err)
-		}
-
-		if resp.IsBlocked() {
-			return fmt.Errorf("order rejected by AML screening: %s (score=%.2f, elevation=%d)",
-				resp.ResponseElevationContent, resp.Score, resp.ResponseElevation)
-		}
-
-		return nil
+// NewPreTradeScreen creates a pre-trade screener using the given Jube client.
+func NewPreTradeScreen(client *Client, cfg PreTradeConfig) *PreTradeScreen {
+	if cfg.ModelID == 0 {
+		cfg.ModelID = 1 // default model
+	}
+	return &PreTradeScreen{
+		client: client,
+		cfg:    cfg,
 	}
 }
 
-// PostTradeHook returns a function compatible with engine.AddPostTradeHook.
-// It sends executed trades to Jube for post-trade monitoring and surveillance.
-func (s *PreTradeScreen) PostTradeHook() func(ctx context.Context, trade *cextypes.Trade) {
-	return func(ctx context.Context, trade *cextypes.Trade) {
-		qty, _ := strconv.ParseFloat(trade.Qty, 64)
-		price, _ := strconv.ParseFloat(trade.Price, 64)
-		amount := fmt.Sprintf("%.2f", qty*price)
+// Screen submits a transaction to Jube for AML/fraud scoring and returns
+// a decision. This should be called in the broker's order creation path
+// after risk checks pass but before the order reaches the provider.
+func (s *PreTradeScreen) Screen(ctx context.Context, req ScreenRequest) PreTradeResult {
+	txReq := TransactionRequest{
+		EntityAnalysisModelID: s.cfg.ModelID,
+		EntityInstanceEntryPayload: map[string]interface{}{
+			"AccountId":     req.AccountID,
+			"TransactionId": req.OrderID,
+			"Amount":        req.Amount(),
+			"Currency":      req.Currency,
+			"Symbol":        req.Symbol,
+			"Side":          req.Side,
+			"Provider":      req.Provider,
+			"IP":            req.IP,
+		},
+	}
 
-		tx := &Transaction{
-			AccountID:      trade.AccountID,
-			TxnID:          trade.ID,
-			TxnDateTime:    time.Now().UTC().Format("2006-01-02T15:04:05.000"),
-			Currency:       "USD",
-			CurrencyAmount: amount,
-			AmountUSD:      amount,
-			ServiceCode:    "TRADE_SETTLE",
-			ChannelID:      "ATS",
-			OrderID:        trade.OrderID,
+	resp, err := s.client.ScreenTransaction(ctx, txReq)
+	if err != nil {
+		slog.Error("jube: pre-trade screen failed",
+			"account", req.AccountID,
+			"symbol", req.Symbol,
+			"error", err,
+		)
+
+		if s.cfg.AllowOnError {
+			return PreTradeResult{
+				Action:   PreTradeAllow,
+				Allowed:  true,
+				Warnings: []string{fmt.Sprintf("jube unavailable: %v", err)},
+			}
+		}
+		return PreTradeResult{
+			Action:  PreTradeBlock,
+			Allowed: false,
+			Errors:  []string{fmt.Sprintf("compliance check unavailable: %v", err)},
+		}
+	}
+
+	result := PreTradeResult{
+		Score:  resp.Score,
+		Alerts: resp.Alerts,
+	}
+
+	switch resp.Action {
+	case ActionBlock:
+		result.Action = PreTradeBlock
+		result.Allowed = false
+		result.Errors = append(result.Errors, "transaction blocked by AML screening")
+		for _, a := range resp.Alerts {
+			result.Errors = append(result.Errors, fmt.Sprintf("[%s] %s (score=%.2f)", a.Severity, a.RuleName, a.Score))
 		}
 
-		// Fire and forget — post-trade monitoring should not block
-		_, _ = s.client.Screen(ctx, tx)
+	case ActionReview:
+		result.Action = PreTradeReview
+		result.Allowed = s.cfg.AllowOnReview
+		result.Warnings = append(result.Warnings, "transaction flagged for manual review")
+		for _, a := range resp.Alerts {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("[%s] %s (score=%.2f)", a.Severity, a.RuleName, a.Score))
+		}
+
+	default: // allow
+		result.Action = PreTradeAllow
+		result.Allowed = true
+	}
+
+	// Fire webhook async for flagged/blocked transactions.
+	if resp.Action == ActionBlock || resp.Action == ActionReview {
+		if s.cfg.WebhookURL != "" && s.cfg.WebhookHMACSecret != "" {
+			go s.fireAMLWebhook(req, resp)
+		}
+	}
+
+	return result
+}
+
+// ScreenRequest contains the order details for AML screening.
+type ScreenRequest struct {
+	AccountID string
+	OrderID   string
+	Provider  string
+	Symbol    string
+	Side      string
+	Qty       string
+	Price     string
+	Currency  string
+	IP        string
+}
+
+// Amount returns the estimated USD value of the order.
+func (r ScreenRequest) Amount() float64 {
+	q, _ := strconv.ParseFloat(r.Qty, 64)
+	p, _ := strconv.ParseFloat(r.Price, 64)
+	if p == 0 {
+		p = 1
+	}
+	return q * p
+}
+
+// fireAMLWebhook sends an aml.flagged webhook event.
+func (s *PreTradeScreen) fireAMLWebhook(req ScreenRequest, resp *TransactionResponse) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	event := WebhookEvent{
+		Event:     EventAMLFlagged,
+		Timestamp: time.Now().UTC(),
+		Data: AMLFlaggedData{
+			AccountID:     req.AccountID,
+			TransactionID: req.OrderID,
+			RiskScore:     resp.Score,
+			Alerts:        resp.Alerts,
+			Action:        resp.Action,
+		},
+	}
+
+	if err := FireWebhook(ctx, event, s.cfg.WebhookURL, s.cfg.WebhookHMACSecret); err != nil {
+		slog.Error("jube: failed to fire aml.flagged webhook",
+			"account", req.AccountID,
+			"error", err,
+		)
 	}
 }
