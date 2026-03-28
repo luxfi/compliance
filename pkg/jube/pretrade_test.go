@@ -6,131 +6,155 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	cextypes "github.com/luxfi/cex/pkg/types"
 )
 
-func TestPreTradeScreen_AllowsCleanOrder(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
-			"ActivationsRaised":    0,
-			"Score":                0.05,
-			"ResponseElevation":    0,
-		})
-	}))
-	defer srv.Close()
-
-	c, _ := NewClient(Config{BaseURL: srv.URL, ModelID: "m"})
-	screen := NewPreTradeScreen(c)
-	check := screen.Check()
-
-	err := check(context.Background(), &cextypes.Order{
-		ID:         "ord-1",
-		AccountID:  "acct-1",
-		Symbol:     "AAPL",
-		Qty:        "10",
-		LimitPrice: "150.00",
-	})
+func newTestScreen(t *testing.T, handler http.HandlerFunc, cfg PreTradeConfig) (*PreTradeScreen, func()) {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	c, err := New(Config{BaseURL: srv.URL})
 	if err != nil {
-		t.Fatalf("expected order allowed, got: %v", err)
+		t.Fatalf("New() error: %v", err)
+	}
+	screen := NewPreTradeScreen(c, cfg)
+	return screen, func() {
+		c.Close()
+		srv.Close()
 	}
 }
 
-func TestPreTradeScreen_BlocksHighRiskOrder(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
-			"ActivationsRaised":        3,
-			"Score":                    0.99,
-			"ResponseElevation":        3,
-			"ResponseElevationContent": "Sanctions match detected",
+func TestScreenAllowCleanTransaction(t *testing.T) {
+	screen, cleanup := newTestScreen(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(TransactionResponse{
+			Score:  0.1,
+			Action: ActionAllow,
 		})
-	}))
-	defer srv.Close()
+	}, PreTradeConfig{})
+	defer cleanup()
 
-	c, _ := NewClient(Config{BaseURL: srv.URL, ModelID: "m"})
-	screen := NewPreTradeScreen(c)
-	check := screen.Check()
-
-	err := check(context.Background(), &cextypes.Order{
-		ID:         "ord-2",
-		AccountID:  "acct-bad",
-		Symbol:     "BTC-USD",
-		Qty:        "100",
-		LimitPrice: "50000.00",
+	result := screen.Screen(context.Background(), ScreenRequest{
+		AccountID: "acct-clean",
+		Symbol:    "AAPL",
+		Side:      "buy",
+		Qty:       "10",
+		Price:     "150.00",
+		Currency:  "USD",
 	})
-	if err == nil {
-		t.Fatal("expected order rejected")
+
+	if !result.Allowed {
+		t.Fatalf("expected allowed=true, got false; errors: %v", result.Errors)
+	}
+	if result.Action != PreTradeAllow {
+		t.Fatalf("action = %q, want %q", result.Action, PreTradeAllow)
+	}
+	if result.Score != 0.1 {
+		t.Fatalf("score = %f, want 0.1", result.Score)
 	}
 }
 
-func TestPreTradeScreen_FailOpenAllows(t *testing.T) {
-	c, _ := NewClient(Config{
-		BaseURL:  "http://127.0.0.1:1",
-		ModelID:  "m",
-		FailOpen: true,
-	})
-	screen := NewPreTradeScreen(c)
-	check := screen.Check()
+func TestScreenBlockHighRisk(t *testing.T) {
+	screen, cleanup := newTestScreen(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(TransactionResponse{
+			Score:  0.95,
+			Action: ActionBlock,
+			Alerts: []Alert{
+				{ID: "a1", RuleName: "structuring", Severity: "critical", Score: 0.95},
+			},
+		})
+	}, PreTradeConfig{})
+	defer cleanup()
 
-	err := check(context.Background(), &cextypes.Order{
-		ID:        "ord-3",
-		AccountID: "acct-1",
-		Symbol:    "AAPL",
+	result := screen.Screen(context.Background(), ScreenRequest{
+		AccountID: "acct-sus",
+		Symbol:    "BTC-USD",
+		Side:      "buy",
 		Qty:       "1",
-		LimitPrice: "100.00",
+		Price:     "9500",
+		Currency:  "USD",
 	})
-	if err != nil {
-		t.Fatalf("expected fail-open to allow order, got: %v", err)
+
+	if result.Allowed {
+		t.Fatal("expected allowed=false for blocked transaction")
+	}
+	if result.Action != PreTradeBlock {
+		t.Fatalf("action = %q, want %q", result.Action, PreTradeBlock)
 	}
 }
 
-func TestPreTradeScreen_FailClosedRejects(t *testing.T) {
-	c, _ := NewClient(Config{
-		BaseURL:  "http://127.0.0.1:1",
-		ModelID:  "m",
-		FailOpen: false,
-	})
-	screen := NewPreTradeScreen(c)
-	check := screen.Check()
+func TestScreenFailOpenOnError(t *testing.T) {
+	screen, cleanup := newTestScreen(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"internal"}`))
+	}, PreTradeConfig{AllowOnError: true})
+	defer cleanup()
 
-	err := check(context.Background(), &cextypes.Order{
-		ID:        "ord-4",
-		AccountID: "acct-1",
-		Symbol:    "AAPL",
-		Qty:       "1",
-		LimitPrice: "100.00",
+	result := screen.Screen(context.Background(), ScreenRequest{
+		AccountID: "acct-err",
+		Symbol:    "GOOG",
+		Side:      "buy",
+		Qty:       "5",
+		Price:     "100",
+		Currency:  "USD",
 	})
-	if err == nil {
-		t.Fatal("expected fail-closed to reject order")
+
+	if !result.Allowed {
+		t.Fatal("expected allowed=true (fail-open) when Jube returns error")
+	}
+	if result.Action != PreTradeAllow {
+		t.Fatalf("action = %q, want %q", result.Action, PreTradeAllow)
+	}
+	if len(result.Warnings) == 0 {
+		t.Fatal("expected warning about Jube unavailability")
 	}
 }
 
-func TestPreTradeScreen_NotionalOrder(t *testing.T) {
-	var receivedTx Transaction
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&receivedTx)
-		json.NewEncoder(w).Encode(map[string]any{
-			"ResponseElevation": 0,
-			"Score":             0.01,
-		})
-	}))
-	defer srv.Close()
+func TestScreenFailClosedOnError(t *testing.T) {
+	screen, cleanup := newTestScreen(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"internal"}`))
+	}, PreTradeConfig{AllowOnError: false})
+	defer cleanup()
 
-	c, _ := NewClient(Config{BaseURL: srv.URL, ModelID: "m"})
-	screen := NewPreTradeScreen(c)
-	check := screen.Check()
-
-	// Notional order (no qty/price, just dollar amount)
-	err := check(context.Background(), &cextypes.Order{
-		ID:        "ord-5",
-		AccountID: "acct-1",
-		Symbol:    "AAPL",
-		Notional:  "5000.00",
+	result := screen.Screen(context.Background(), ScreenRequest{
+		AccountID: "acct-err",
+		Symbol:    "GOOG",
+		Side:      "buy",
+		Qty:       "5",
+		Price:     "100",
+		Currency:  "USD",
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+
+	if result.Allowed {
+		t.Fatal("expected allowed=false (fail-closed) when Jube returns error")
 	}
-	if receivedTx.CurrencyAmount != "5000.00" {
-		t.Fatalf("expected notional 5000.00, got %s", receivedTx.CurrencyAmount)
+	if result.Action != PreTradeBlock {
+		t.Fatalf("action = %q, want %q", result.Action, PreTradeBlock)
+	}
+}
+
+func TestScreenRequestAmount(t *testing.T) {
+	tests := []struct {
+		qty, price string
+		want       float64
+	}{
+		{"10", "150", 1500},
+		{"0.5", "100", 50},
+		{"100", "", 100},  // no price = market order, p defaults to 1
+		{"", "100", 0},    // no qty = 0
+		{"abc", "100", 0}, // invalid qty
+	}
+
+	for _, tt := range tests {
+		r := ScreenRequest{Qty: tt.qty, Price: tt.price}
+		got := r.Amount()
+		if got != tt.want {
+			t.Errorf("Amount(%q, %q) = %f, want %f", tt.qty, tt.price, got, tt.want)
+		}
+	}
+}
+
+func TestScreenDefaultModelID(t *testing.T) {
+	screen := NewPreTradeScreen(&Client{}, PreTradeConfig{})
+	if screen.cfg.ModelID != 1 {
+		t.Fatalf("default ModelID = %d, want 1", screen.cfg.ModelID)
 	}
 }

@@ -1,9 +1,3 @@
-// Package jube provides an HTTP client for the Jube AML/fraud detection API.
-//
-// Jube is a C# transaction monitoring engine that exposes an HTTP API at
-// POST /api/invoke/EntityAnalysisModel/{modelGUID}. It scores transactions
-// in real time against configurable rules and ML models, returning activation
-// alerts, sanctions matches, and response elevations.
 package jube
 
 import (
@@ -13,145 +7,168 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
+// DefaultBaseURL is the default Jube sidecar address.
+const DefaultBaseURL = "http://jube:5001"
+
+// DefaultTimeout is the HTTP request timeout for Jube API calls.
+const DefaultTimeout = 10 * time.Second
+
 // Config holds Jube client configuration.
 type Config struct {
-	// BaseURL is the Jube API base URL (e.g. "http://jube.liquidity.svc.cluster.local:5001").
-	BaseURL string
-
-	// ModelID is the EntityAnalysisModel GUID to invoke for transaction screening.
-	ModelID string
-
-	// FailOpen determines behavior when Jube is unreachable.
-	// If true, transactions are allowed through when Jube is down.
-	// If false, transactions are rejected when Jube is unavailable.
-	FailOpen bool
-
-	// Timeout for HTTP requests to Jube. Defaults to 5 seconds.
-	Timeout time.Duration
+	BaseURL string        // Jube sidecar URL (default: http://jube:5001)
+	Timeout time.Duration // HTTP timeout (default: 10s)
 }
 
-// Client is an HTTP client for the Jube AML/fraud API.
+// Client is an HTTP client for the Jube AML/fraud detection sidecar.
 type Client struct {
-	cfg    Config
-	http   *http.Client
+	baseURL    string
+	httpClient *http.Client
 }
 
-// NewClient creates a Jube API client.
-func NewClient(cfg Config) (*Client, error) {
-	if cfg.BaseURL == "" {
-		return nil, fmt.Errorf("jube: BaseURL is required")
-	}
-	if cfg.ModelID == "" {
-		return nil, fmt.Errorf("jube: ModelID is required")
+// New creates a new Jube client.
+func New(cfg Config) (*Client, error) {
+	baseURL := cfg.BaseURL
+	if baseURL == "" {
+		baseURL = DefaultBaseURL
 	}
 	timeout := cfg.Timeout
 	if timeout == 0 {
-		timeout = 5 * time.Second
+		timeout = DefaultTimeout
 	}
+
 	return &Client{
-		cfg: cfg,
-		http: &http.Client{
+		baseURL: baseURL,
+		httpClient: &http.Client{
 			Timeout: timeout,
 		},
 	}, nil
 }
 
-// Transaction is the payload sent to Jube for scoring.
-// Fields map to Jube's EntityAnalysisModel request XPaths.
-type Transaction struct {
-	AccountID     string  `json:"AccountId"`
-	TxnID         string  `json:"TxnId"`
-	TxnDateTime   string  `json:"TxnDateTime"`   // ISO 8601
-	Currency      string  `json:"Currency"`
-	CurrencyAmount string `json:"CurrencyAmount"`
-	AmountUSD     string  `json:"AmountUSD,omitempty"`
-	ResponseCode  string  `json:"ResponseCode,omitempty"`
-	IP            string  `json:"IP,omitempty"`
-	ChannelID     string  `json:"ChannelId,omitempty"`
-	ServiceCode   string  `json:"ServiceCode,omitempty"`
-	Email         string  `json:"Email,omitempty"`
-	ToAccountID   string  `json:"ToAccountId,omitempty"`
-	OrderID       string  `json:"OrderId,omitempty"`
+// Close releases resources held by the client.
+func (c *Client) Close() error {
+	return nil
 }
 
-// Response is the decoded Jube scoring response.
-type Response struct {
-	// ActivationsRaised indicates the number of rule activations triggered.
-	ActivationsRaised int `json:"ActivationsRaised"`
-
-	// Score is the overall risk score (0-1, higher = riskier).
-	Score float64 `json:"Score"`
-
-	// ResponseElevation is Jube's recommended action:
-	//   0 = allow, 1 = review, 2 = suspend, 3 = reject
-	ResponseElevation int `json:"ResponseElevation"`
-
-	// ResponseElevationContent is a human-readable reason.
-	ResponseElevationContent string `json:"ResponseElevationContent"`
-
-	// EntityAnalysisModelInstanceEntryGUID is the unique instance entry for callback.
-	EntryGUID string `json:"EntityAnalysisModelInstanceEntryGuid"`
-
-	// Raw holds the full JSON response for inspection.
-	Raw json.RawMessage `json:"-"`
+// ScreenTransaction submits a transaction to Jube for real-time risk scoring.
+// Calls POST /api/EntityAnalysisModel/Invoke.
+func (c *Client) ScreenTransaction(ctx context.Context, req TransactionRequest) (*TransactionResponse, error) {
+	var resp TransactionResponse
+	if err := c.post(ctx, "/api/EntityAnalysisModel/Invoke", req, &resp); err != nil {
+		return nil, fmt.Errorf("jube: screen transaction: %w", err)
+	}
+	return &resp, nil
 }
 
-// Screen sends a transaction to Jube for real-time scoring.
-// Returns the scoring response or an error.
-func (c *Client) Screen(ctx context.Context, tx *Transaction) (*Response, error) {
-	body, err := json.Marshal(tx)
-	if err != nil {
-		return nil, fmt.Errorf("jube: marshal transaction: %w", err)
+// CheckSanctions performs sanctions screening against Jube's lists.
+// Calls GET /api/Sanction with name and country query params.
+func (c *Client) CheckSanctions(ctx context.Context, name, country string) (*SanctionResult, error) {
+	params := url.Values{}
+	params.Set("name", name)
+	if country != "" {
+		params.Set("country", country)
 	}
 
-	url := c.cfg.BaseURL + "/api/invoke/EntityAnalysisModel/" + c.cfg.ModelID
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	var resp SanctionResult
+	if err := c.get(ctx, "/api/Sanction?"+params.Encode(), &resp); err != nil {
+		return nil, fmt.Errorf("jube: check sanctions: %w", err)
+	}
+	return &resp, nil
+}
+
+// CreateCase creates a new compliance case in Jube.
+// Calls POST /api/CaseManagement.
+func (c *Client) CreateCase(ctx context.Context, req CaseRequest) (*Case, error) {
+	var resp Case
+	if err := c.post(ctx, "/api/CaseManagement", req, &resp); err != nil {
+		return nil, fmt.Errorf("jube: create case: %w", err)
+	}
+	return &resp, nil
+}
+
+// GetCases retrieves compliance cases matching the given filters.
+// Calls GET /api/CaseManagement with optional query params.
+func (c *Client) GetCases(ctx context.Context, filter CaseFilter) ([]Case, error) {
+	params := url.Values{}
+	if filter.AccountID != "" {
+		params.Set("accountId", filter.AccountID)
+	}
+	if filter.Type != "" {
+		params.Set("type", filter.Type)
+	}
+	if filter.Status != "" {
+		params.Set("status", filter.Status)
+	}
+
+	path := "/api/CaseManagement"
+	if len(params) > 0 {
+		path += "?" + params.Encode()
+	}
+
+	var resp []Case
+	if err := c.get(ctx, path, &resp); err != nil {
+		return nil, fmt.Errorf("jube: get cases: %w", err)
+	}
+	return resp, nil
+}
+
+// Search performs an exhaustive search across Jube entities.
+// Calls POST /api/ExhaustiveSearchInstance.
+func (c *Client) Search(ctx context.Context, req SearchRequest) ([]SearchResult, error) {
+	var resp []SearchResult
+	if err := c.post(ctx, "/api/ExhaustiveSearchInstance", req, &resp); err != nil {
+		return nil, fmt.Errorf("jube: search: %w", err)
+	}
+	return resp, nil
+}
+
+// post sends a POST request with a JSON body and decodes the response.
+func (c *Client) post(ctx context.Context, path string, body, dst interface{}) error {
+	payload, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("jube: create request: %w", err)
+		return fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.http.Do(req)
+	return c.doJSON(req, dst)
+}
+
+// get sends a GET request and decodes the JSON response.
+func (c *Client) get(ctx context.Context, path string, dst interface{}) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
-		return nil, fmt.Errorf("jube: request failed: %w", err)
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	return c.doJSON(req, dst)
+}
+
+// doJSON executes an HTTP request and decodes the JSON response into dst.
+func (c *Client) doJSON(req *http.Request, dst interface{}) error {
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("http %s %s: %w", req.Method, req.URL.Path, err)
 	}
 	defer resp.Body.Close()
 
-	rawBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("jube: read response: %w", err)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("http %s %s: status %d: %s", req.Method, req.URL.Path, resp.StatusCode, string(body))
 	}
 
-	if resp.StatusCode == http.StatusServiceUnavailable {
-		return nil, fmt.Errorf("jube: service unavailable (503)")
+	if dst != nil {
+		if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
+			return fmt.Errorf("decode response: %w", err)
+		}
 	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("jube: HTTP %d: %s", resp.StatusCode, string(rawBody))
-	}
-
-	var result Response
-	if err := json.Unmarshal(rawBody, &result); err != nil {
-		return nil, fmt.Errorf("jube: decode response: %w", err)
-	}
-	result.Raw = rawBody
-
-	return &result, nil
-}
-
-// IsBlocked returns true if Jube recommends rejecting the transaction.
-func (r *Response) IsBlocked() bool {
-	return r.ResponseElevation >= 3
-}
-
-// NeedsReview returns true if the transaction needs manual review.
-func (r *Response) NeedsReview() bool {
-	return r.ResponseElevation >= 1
-}
-
-// FailOpen returns the client's fail-open setting.
-func (c *Client) FailOpen() bool {
-	return c.cfg.FailOpen
+	return nil
 }

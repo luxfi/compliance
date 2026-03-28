@@ -5,185 +5,178 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 )
 
-func TestNewClient_RequiresBaseURL(t *testing.T) {
-	_, err := NewClient(Config{ModelID: "test"})
-	if err == nil {
-		t.Fatal("expected error for empty BaseURL")
+func TestNewClientDefaults(t *testing.T) {
+	c, err := New(Config{})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer c.Close()
+
+	if c.baseURL != DefaultBaseURL {
+		t.Fatalf("baseURL = %q, want %q", c.baseURL, DefaultBaseURL)
+	}
+	if c.httpClient.Timeout != DefaultTimeout {
+		t.Fatalf("timeout = %v, want %v", c.httpClient.Timeout, DefaultTimeout)
 	}
 }
 
-func TestNewClient_RequiresModelID(t *testing.T) {
-	_, err := NewClient(Config{BaseURL: "http://localhost:5001"})
-	if err == nil {
-		t.Fatal("expected error for empty ModelID")
+func TestNewClientCustomBaseURL(t *testing.T) {
+	c, err := New(Config{BaseURL: "http://localhost:9999", Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer c.Close()
+
+	if c.baseURL != "http://localhost:9999" {
+		t.Fatalf("baseURL = %q, want http://localhost:9999", c.baseURL)
+	}
+	if c.httpClient.Timeout != 5*time.Second {
+		t.Fatalf("timeout = %v, want 5s", c.httpClient.Timeout)
 	}
 }
 
-func TestScreen_Success(t *testing.T) {
+func TestScreenTransaction(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			t.Fatalf("expected POST, got %s", r.Method)
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
 		}
-		if r.URL.Path != "/api/invoke/EntityAnalysisModel/test-model-id" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
-		}
-
-		var tx Transaction
-		if err := json.NewDecoder(r.Body).Decode(&tx); err != nil {
-			t.Fatal(err)
-		}
-		if tx.AccountID != "acct-123" {
-			t.Fatalf("expected acct-123, got %s", tx.AccountID)
+		if r.URL.Path != "/api/EntityAnalysisModel/Invoke" {
+			t.Errorf("path = %s, want /api/EntityAnalysisModel/Invoke", r.URL.Path)
 		}
 
-		json.NewEncoder(w).Encode(map[string]any{
-			"ActivationsRaised":                    0,
-			"Score":                                0.12,
-			"ResponseElevation":                    0,
-			"ResponseElevationContent":             "",
-			"EntityAnalysisModelInstanceEntryGuid": "abc-def",
+		var req TransactionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.EntityAnalysisModelID != 1 {
+			t.Errorf("modelId = %d, want 1", req.EntityAnalysisModelID)
+		}
+
+		json.NewEncoder(w).Encode(TransactionResponse{
+			Score:  0.85,
+			Action: ActionBlock,
+			Alerts: []Alert{{ID: "a1", RuleName: "high-value", Severity: "high"}},
 		})
 	}))
 	defer srv.Close()
 
-	c, err := NewClient(Config{
-		BaseURL: srv.URL,
-		ModelID: "test-model-id",
+	c, err := New(Config{BaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer c.Close()
+
+	resp, err := c.ScreenTransaction(context.Background(), TransactionRequest{
+		EntityAnalysisModelID: 1,
+		EntityInstanceEntryPayload: map[string]interface{}{
+			"AccountId": "acct-123",
+			"Amount":    50000,
+			"Currency":  "USD",
+		},
 	})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("ScreenTransaction() error: %v", err)
 	}
-
-	resp, err := c.Screen(context.Background(), &Transaction{
-		AccountID:      "acct-123",
-		TxnID:          "txn-456",
-		CurrencyAmount: "1000.00",
-	})
-	if err != nil {
-		t.Fatal(err)
+	if resp.Score != 0.85 {
+		t.Fatalf("score = %f, want 0.85", resp.Score)
 	}
-
-	if resp.IsBlocked() {
-		t.Fatal("expected not blocked")
+	if resp.Action != ActionBlock {
+		t.Fatalf("action = %q, want %q", resp.Action, ActionBlock)
 	}
-	if resp.NeedsReview() {
-		t.Fatal("expected no review needed")
-	}
-	if resp.Score != 0.12 {
-		t.Fatalf("expected score 0.12, got %f", resp.Score)
+	if len(resp.Alerts) != 1 {
+		t.Fatalf("alerts len = %d, want 1", len(resp.Alerts))
 	}
 }
 
-func TestScreen_Blocked(t *testing.T) {
+func TestCheckSanctions(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
-			"ActivationsRaised":        2,
-			"Score":                    0.95,
-			"ResponseElevation":        3,
-			"ResponseElevationContent": "High risk: sanctions match",
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		name := r.URL.Query().Get("name")
+		if name != "John Doe" {
+			t.Errorf("name param = %q, want 'John Doe'", name)
+		}
+
+		json.NewEncoder(w).Encode(SanctionResult{
+			Hit: true,
+			Matches: []SanctionMatch{
+				{ListName: "OFAC SDN", EntityName: "John Doe", Score: 0.95, Country: "US"},
+			},
 		})
 	}))
 	defer srv.Close()
 
-	c, err := NewClient(Config{BaseURL: srv.URL, ModelID: "m"})
+	c, err := New(Config{BaseURL: srv.URL})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("New() error: %v", err)
 	}
+	defer c.Close()
 
-	resp, err := c.Screen(context.Background(), &Transaction{
-		AccountID:      "acct-bad",
-		TxnID:          "txn-999",
-		CurrencyAmount: "50000.00",
-	})
+	result, err := c.CheckSanctions(context.Background(), "John Doe", "US")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("CheckSanctions() error: %v", err)
 	}
-	if !resp.IsBlocked() {
-		t.Fatal("expected blocked")
+	if !result.Hit {
+		t.Fatal("expected sanctions hit")
 	}
-	if !resp.NeedsReview() {
-		t.Fatal("expected review")
+	if len(result.Matches) != 1 {
+		t.Fatalf("matches len = %d, want 1", len(result.Matches))
 	}
 }
 
-func TestScreen_FailOpen(t *testing.T) {
-	c, err := NewClient(Config{
-		BaseURL:  "http://127.0.0.1:1", // unreachable
-		ModelID:  "m",
-		FailOpen: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !c.FailOpen() {
-		t.Fatal("expected FailOpen=true")
-	}
-
-	// Screen should return error (caller decides fail-open behavior)
-	_, err = c.Screen(context.Background(), &Transaction{
-		AccountID: "test",
-		TxnID:     "test",
-	})
-	if err == nil {
-		t.Fatal("expected error for unreachable server")
-	}
-}
-
-func TestScreen_FailClosed(t *testing.T) {
-	c, err := NewClient(Config{
-		BaseURL:  "http://127.0.0.1:1",
-		ModelID:  "m",
-		FailOpen: false,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if c.FailOpen() {
-		t.Fatal("expected FailOpen=false")
-	}
-}
-
-func TestScreen_HTTP503(t *testing.T) {
+func TestScreenTransactionHTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"model not found"}`))
 	}))
 	defer srv.Close()
 
-	c, err := NewClient(Config{BaseURL: srv.URL, ModelID: "m"})
+	c, err := New(Config{BaseURL: srv.URL})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("New() error: %v", err)
 	}
+	defer c.Close()
 
-	_, err = c.Screen(context.Background(), &Transaction{AccountID: "test", TxnID: "test"})
+	_, err = c.ScreenTransaction(context.Background(), TransactionRequest{EntityAnalysisModelID: 999})
 	if err == nil {
-		t.Fatal("expected error for 503")
+		t.Fatal("expected error for 500 response")
+	}
+	if !strings.Contains(err.Error(), "status 500") {
+		t.Fatalf("error should mention status 500, got: %v", err)
 	}
 }
 
-func TestResponse_Elevation(t *testing.T) {
-	tests := []struct {
-		elevation int
-		blocked   bool
-		review    bool
-	}{
-		{0, false, false},
-		{1, false, true},
-		{2, false, true},
-		{3, true, true},
-		{4, true, true},
+func TestVerifySignature(t *testing.T) {
+	payload := []byte(`{"event":"aml.flagged","data":{"accountId":"123"}}`)
+	secret := "my-hmac-secret"
+
+	sig := SignPayload(payload, secret)
+
+	if !VerifySignature(payload, sig, secret) {
+		t.Fatal("valid signature rejected")
 	}
-	for _, tt := range tests {
-		r := &Response{ResponseElevation: tt.elevation}
-		if r.IsBlocked() != tt.blocked {
-			t.Errorf("elevation %d: IsBlocked=%v, want %v", tt.elevation, r.IsBlocked(), tt.blocked)
-		}
-		if r.NeedsReview() != tt.review {
-			t.Errorf("elevation %d: NeedsReview=%v, want %v", tt.elevation, r.NeedsReview(), tt.review)
-		}
+	if VerifySignature(payload, sig, "wrong-secret") {
+		t.Fatal("invalid secret accepted")
+	}
+	if VerifySignature(payload, "deadbeef", secret) {
+		t.Fatal("invalid signature accepted")
+	}
+}
+
+func TestActionConstants(t *testing.T) {
+	if ActionAllow != "allow" {
+		t.Fatalf("ActionAllow = %q", ActionAllow)
+	}
+	if ActionBlock != "block" {
+		t.Fatalf("ActionBlock = %q", ActionBlock)
+	}
+	if ActionReview != "review" {
+		t.Fatalf("ActionReview = %q", ActionReview)
 	}
 }
