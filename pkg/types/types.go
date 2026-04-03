@@ -367,6 +367,7 @@ type Application struct {
 	RiskLevel    RiskLevel         `json:"risk_level,omitempty"`
 	RiskScore    float64           `json:"risk_score,omitempty"`
 	SubmittedAt  time.Time         `json:"submitted_at,omitempty"`
+	AlpacaAccountID string          `json:"alpaca_account_id,omitempty"`
 	ReviewedBy   string            `json:"reviewed_by,omitempty"`
 	ReviewedAt   time.Time         `json:"reviewed_at,omitempty"`
 	CreatedAt    time.Time         `json:"created_at"`
