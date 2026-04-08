@@ -298,7 +298,8 @@ type Settings struct {
 type Credential struct {
 	ID          string    `json:"id"`
 	Name        string    `json:"name"`
-	KeyPrefix   string    `json:"key_prefix"` // first 8 chars, for display only
+	KeyPrefix   string    `json:"key_prefix"`          // first 8 chars, for display only
+	KeyHash     string    `json:"-"`                    // bcrypt hash of full key, never serialized
 	Permissions []string  `json:"permissions"`
 	CreatedAt   time.Time `json:"created_at"`
 	ExpiresAt   string    `json:"expires_at,omitempty"`
