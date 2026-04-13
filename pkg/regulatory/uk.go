@@ -8,8 +8,10 @@ package regulatory
 // Covers FCA registration, 5AMLD, CDD/EDD requirements.
 type UK struct{}
 
-func (u *UK) Name() string { return "United Kingdom" }
-func (u *UK) Code() string { return "GB" }
+func (u *UK) Name() string              { return "United Kingdom" }
+func (u *UK) Code() string              { return "GB" }
+func (u *UK) RegulatoryFramework() string { return "uk_fca" }
+func (u *UK) PassportableTo() []string  { return nil }
 
 func (u *UK) Requirements() []Requirement {
 	return []Requirement{

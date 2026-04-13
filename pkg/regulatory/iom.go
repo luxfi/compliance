@@ -9,8 +9,10 @@ package regulatory
 // Code 2019, Designated Business registration, and CDD/EDD requirements.
 type IOM struct{}
 
-func (iom *IOM) Name() string { return "Isle of Man" }
-func (iom *IOM) Code() string { return "IM" }
+func (iom *IOM) Name() string              { return "Isle of Man" }
+func (iom *IOM) Code() string              { return "IM" }
+func (iom *IOM) RegulatoryFramework() string { return "iom" }
+func (iom *IOM) PassportableTo() []string  { return nil }
 
 func (iom *IOM) Requirements() []Requirement {
 	return []Requirement{

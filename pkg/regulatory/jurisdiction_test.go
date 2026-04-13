@@ -461,7 +461,7 @@ func TestGetJurisdiction(t *testing.T) {
 
 func TestAllJurisdictions(t *testing.T) {
 	all := AllJurisdictions()
-	if len(all) != 3 {
-		t.Fatalf("expected 3 jurisdictions, got %d", len(all))
+	if len(all) != 20 {
+		t.Fatalf("expected 20 jurisdictions, got %d", len(all))
 	}
 }

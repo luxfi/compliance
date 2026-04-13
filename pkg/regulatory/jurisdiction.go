@@ -10,7 +10,9 @@ package regulatory
 // Jurisdiction defines the compliance requirements for a specific regulatory regime.
 type Jurisdiction interface {
 	Name() string
-	Code() string // ISO 3166-1 alpha-2
+	Code() string // ISO 3166-1 alpha-2 (or ISO 3166-2 for subdivisions like AE-DIFC)
+	RegulatoryFramework() string
+	PassportableTo() []string // jurisdiction codes this one can passport to (empty for most)
 	Requirements() []Requirement
 	ValidateApplication(app *ApplicationData) []Violation
 	TransactionLimits() *Limits
@@ -81,6 +83,8 @@ type ApplicationData struct {
 }
 
 // GetJurisdiction returns a jurisdiction implementation by ISO country code.
+// Uses ISO 3166-1 alpha-2 codes, or ISO 3166-2 subdivision codes for
+// jurisdictions with distinct regulatory regimes (e.g. AE-DIFC, AE-ADGM, AE-VARA).
 func GetJurisdiction(code string) Jurisdiction {
 	switch code {
 	case "US":
@@ -89,6 +93,40 @@ func GetJurisdiction(code string) Jurisdiction {
 		return &UK{}
 	case "IM":
 		return &IOM{}
+	case "CA":
+		return &Canada{}
+	case "BR":
+		return &Brazil{}
+	case "IN":
+		return &India{}
+	case "SG":
+		return &Singapore{}
+	case "AU":
+		return &Australia{}
+	case "CH":
+		return &Switzerland{}
+	case "AE":
+		return &UAE{}
+	case "AE-DIFC":
+		return &UAEDIFC{}
+	case "AE-ADGM":
+		return &UAEADGM{}
+	case "AE-VARA":
+		return &UAEVARA{}
+	case "LU":
+		return &Luxembourg{}
+	case "DE":
+		return &Germany{}
+	case "FR":
+		return &France{}
+	case "NL":
+		return &Netherlands{}
+	case "IE":
+		return &Ireland{}
+	case "IT":
+		return &Italy{}
+	case "ES":
+		return &Spain{}
 	default:
 		return nil
 	}
@@ -96,5 +134,10 @@ func GetJurisdiction(code string) Jurisdiction {
 
 // AllJurisdictions returns all supported jurisdictions.
 func AllJurisdictions() []Jurisdiction {
-	return []Jurisdiction{&USA{}, &UK{}, &IOM{}}
+	return []Jurisdiction{
+		&USA{}, &UK{}, &IOM{},
+		&Canada{}, &Brazil{}, &India{}, &Singapore{}, &Australia{}, &Switzerland{},
+		&UAE{}, &UAEDIFC{}, &UAEADGM{}, &UAEVARA{},
+		&Luxembourg{}, &Germany{}, &France{}, &Netherlands{}, &Ireland{}, &Italy{}, &Spain{},
+	}
 }

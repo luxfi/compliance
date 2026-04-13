@@ -10,8 +10,10 @@ import "strings"
 // Covers FinCEN BSA, SEC/FINRA, and state money transmission requirements.
 type USA struct{}
 
-func (u *USA) Name() string { return "United States" }
-func (u *USA) Code() string { return "US" }
+func (u *USA) Name() string              { return "United States" }
+func (u *USA) Code() string              { return "US" }
+func (u *USA) RegulatoryFramework() string { return "us_sec_finra" }
+func (u *USA) PassportableTo() []string  { return nil }
 
 func (u *USA) Requirements() []Requirement {
 	return []Requirement{
