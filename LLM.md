@@ -37,9 +37,9 @@ compliance/
     jube/              -- Jube AML sidecar client (HTTP, webhooks, pre-trade screen)
     rbac/              -- Role-based access control (default roles, permission check)
     onboarding/        -- 5-step investor onboarding flow logic
-    regulatory/        -- Multi-jurisdiction rules (US, UK, Isle of Man)
+    regulatory/        -- Multi-jurisdiction rules (20 jurisdictions, 14 frameworks)
     payments/          -- Payment compliance + stablecoin validation
-    entity/            -- Regulated entity types (ATS, BD, TA, MSB)
+    entity/            -- Regulated entity types (13 types: ATS, BD, TA, MSB + EU/CH vehicles)
     webhook/           -- Unified webhook handler with idempotency
 ```
 
@@ -101,11 +101,14 @@ All types shared across broker, bank, and compliance services:
 - Rule types: single_amount, daily_aggregate, velocity, geographic, structuring
 - SAR generation from alerts
 
-### pkg/regulatory -- Jurisdiction Framework
-- `Jurisdiction` interface: requirements, validation, transaction limits
-- USA: FinCEN BSA (CIP, CTR $10k, SAR), SEC/FINRA suitability/disclosures
-- UK: FCA registration, 5AMLD CDD/EDD, HM Treasury sanctions
-- IOM: IOMFSA Designated Business, AML/CFT Code 2019
+### pkg/regulatory -- Multi-Jurisdiction Framework
+- `Jurisdiction` interface: Code, Name, RegulatoryFramework, PassportableTo, Requirements, ValidateApplication, TransactionLimits
+- 20 jurisdictions: US, GB, IM, CA, BR, IN, SG, AU, CH, AE, AE-DIFC, AE-ADGM, AE-VARA, LU, DE, FR, NL, IE, IT, ES
+- 14 frameworks: us_sec_finra, uk_fca, iom, ciro, cvm, sebi, mas, asic, finma, sca, dfsa, fsra, vara, mica
+- `Framework` type + `JurisdictionsByFramework()` + `AllFrameworks()`
+- EU passporting: all 7 MiCA jurisdictions (LU/DE/FR/NL/IE/IT/ES) passport to each other
+- `GetJurisdiction(code)` returns nil for unknown codes; `AllJurisdictions()` returns all 20
+- Shared `validateEUApplication()` and `euTransactionLimits()` for EU jurisdictions
 
 ### pkg/payments -- Payment Compliance
 - `ComplianceEngine`: validates payin/payout against jurisdiction rules
@@ -113,7 +116,14 @@ All types shared across broker, bank, and compliance services:
 - `StablecoinEngine`: token allowlists, address risk, mint/burn compliance
 
 ### pkg/entity -- Regulated Entity Types
-- ATS, Broker-Dealer, Transfer Agent, MSB definitions with net capital rules
+- 13 types via EntityType_* constants: ats, broker_dealer, transfer_agent, msb,
+  sicav, sicar, raif, aifm, mancoman, crr, issuer, custodian, dlt_facility
+- `GetEntity(type)` and `AllEntities()` for registry access
+- Each implements RegulatedEntity: licenses, reporting, capital, operational requirements
+
+### pkg/types -- Asset Classes
+- `AssetClass` type + 38 constants: us_equity, us_crypto, eu_aif, ch_dlt_security, etc.
+- `AllAssetClasses()` returns all defined classes
 
 ### pkg/webhook -- Unified Webhook Handler
 - Multi-provider routing with HMAC-SHA256 signature validation
@@ -123,7 +133,7 @@ All types shared across broker, bank, and compliance services:
 All services use sync.RWMutex for concurrent access. ID generation uses crypto/rand.
 
 ## Test Coverage
-180+ tests across 10 packages. All pass with -race flag.
+250 tests across 11 packages. All pass with -race flag.
 
 ## Relationship to Broker
 The broker (github.com/luxfi/broker) imports this library via:
