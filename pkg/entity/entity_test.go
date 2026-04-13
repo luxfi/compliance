@@ -308,14 +308,19 @@ func TestGetEntityUnknown(t *testing.T) {
 
 func TestAllEntities(t *testing.T) {
 	all := AllEntities()
-	if len(all) != 4 {
-		t.Fatalf("expected 4 entity types, got %d", len(all))
+	if len(all) != 13 {
+		t.Fatalf("expected 13 entity types, got %d", len(all))
 	}
 	types := map[string]bool{}
 	for _, e := range all {
 		types[e.Type()] = true
 	}
-	for _, expected := range []string{"ats", "broker_dealer", "transfer_agent", "msb"} {
+	for _, expected := range []string{
+		EntityType_ATS, EntityType_BrokerDealer, EntityType_TransferAgent, EntityType_MSB,
+		EntityType_SICAV, EntityType_SICAR, EntityType_RAIF, EntityType_AIFM,
+		EntityType_MANCOMAN, EntityType_CRR, EntityType_ISSUER, EntityType_CUSTODIAN,
+		EntityType_DLT_FACILITY,
+	} {
 		if !types[expected] {
 			t.Errorf("missing entity type: %s", expected)
 		}
