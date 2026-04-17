@@ -7,6 +7,9 @@ package idv
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -139,8 +142,25 @@ func (j *Jumio) CheckStatus(ctx context.Context, verificationID string) (*Verifi
 	}, nil
 }
 
-// ParseWebhook parses a Jumio callback/webhook.
+// ParseWebhook parses a Jumio callback/webhook with HMAC-SHA256 signature verification.
+// RED-14: Verifies the Callback-Sig header against the configured APISecret
+// to prevent forged webhook events.
 func (j *Jumio) ParseWebhook(body []byte, headers map[string]string) (*WebhookEvent, error) {
+	// RED-14: Verify HMAC signature.
+	sig := headers["Callback-Sig"]
+	if sig == "" {
+		sig = headers["callback-sig"]
+	}
+	if sig == "" {
+		return nil, fmt.Errorf("missing Callback-Sig header")
+	}
+	mac := hmac.New(sha256.New, []byte(j.cfg.APISecret))
+	mac.Write(body)
+	expected := hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(sig), []byte(expected)) {
+		return nil, fmt.Errorf("invalid callback signature")
+	}
+
 	var payload struct {
 		TransactionReference      string                 `json:"transactionReference"`
 		CustomerInternalReference string                 `json:"customerInternalReference"`

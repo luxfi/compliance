@@ -6,6 +6,9 @@ package idv
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,6 +17,13 @@ import (
 	"strings"
 	"testing"
 )
+
+// jumioSign computes the HMAC-SHA256 signature for test webhook payloads.
+func jumioSign(body []byte, secret string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	return hex.EncodeToString(mac.Sum(nil))
+}
 
 // --- Provider registry ---
 
@@ -170,16 +180,18 @@ func TestJumioCheckStatus(t *testing.T) {
 }
 
 func TestJumioParseWebhookApproved(t *testing.T) {
-	j := NewJumio(JumioConfig{})
-	payload := `{
+	secret := "test-secret"
+	j := NewJumio(JumioConfig{APISecret: secret})
+	payload := []byte(`{
 		"transactionReference": "txn-001",
 		"customerInternalReference": "app-100",
 		"status": "DONE",
 		"verificationStatus": "APPROVED_VERIFIED",
 		"identityVerification": {"similarity": "MATCH", "validity": true}
-	}`
+	}`)
 
-	event, err := j.ParseWebhook([]byte(payload), nil)
+	sig := jumioSign(payload, secret)
+	event, err := j.ParseWebhook(payload, map[string]string{"Callback-Sig": sig})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -212,16 +224,18 @@ func TestJumioParseWebhookDeclined(t *testing.T) {
 		"NO_ID_UPLOADED",
 	}
 
-	j := NewJumio(JumioConfig{})
+	secret := "decline-secret"
+	j := NewJumio(JumioConfig{APISecret: secret})
 	for _, vs := range cases {
 		t.Run(vs, func(t *testing.T) {
-			payload := fmt.Sprintf(`{
+			payload := []byte(fmt.Sprintf(`{
 				"transactionReference": "txn-dec",
 				"customerInternalReference": "app-dec",
 				"status": "FAILED",
 				"verificationStatus": %q
-			}`, vs)
-			event, err := j.ParseWebhook([]byte(payload), nil)
+			}`, vs))
+			sig := jumioSign(payload, secret)
+			event, err := j.ParseWebhook(payload, map[string]string{"Callback-Sig": sig})
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -233,13 +247,16 @@ func TestJumioParseWebhookDeclined(t *testing.T) {
 }
 
 func TestJumioParseWebhookPending(t *testing.T) {
-	j := NewJumio(JumioConfig{})
-	event, err := j.ParseWebhook([]byte(`{
+	secret := "pending-secret"
+	j := NewJumio(JumioConfig{APISecret: secret})
+	payload := []byte(`{
 		"transactionReference": "txn-p",
 		"customerInternalReference": "app-p",
 		"status": "PENDING",
 		"verificationStatus": "UNKNOWN"
-	}`), nil)
+	}`)
+	sig := jumioSign(payload, secret)
+	event, err := j.ParseWebhook(payload, map[string]string{"Callback-Sig": sig})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -249,10 +266,52 @@ func TestJumioParseWebhookPending(t *testing.T) {
 }
 
 func TestJumioParseWebhookInvalidJSON(t *testing.T) {
-	j := NewJumio(JumioConfig{})
-	_, err := j.ParseWebhook([]byte(`not-json`), nil)
+	secret := "json-secret"
+	j := NewJumio(JumioConfig{APISecret: secret})
+	body := []byte(`not-json`)
+	sig := jumioSign(body, secret)
+	_, err := j.ParseWebhook(body, map[string]string{"Callback-Sig": sig})
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+// TestJumioWebhookValidSignature (RED-14) verifies correct HMAC passes.
+func TestJumioWebhookValidSignature(t *testing.T) {
+	secret := "hmac-test-secret"
+	j := NewJumio(JumioConfig{APISecret: secret})
+	payload := []byte(`{"transactionReference":"txn-hmac","status":"DONE","verificationStatus":"APPROVED_VERIFIED"}`)
+	sig := jumioSign(payload, secret)
+
+	event, err := j.ParseWebhook(payload, map[string]string{"Callback-Sig": sig})
+	if err != nil {
+		t.Fatalf("RED-14: valid signature rejected: %v", err)
+	}
+	if event.VerificationID != "txn-hmac" {
+		t.Fatalf("expected txn-hmac, got %q", event.VerificationID)
+	}
+}
+
+// TestJumioWebhookInvalidSignature (RED-14) verifies wrong HMAC is rejected.
+func TestJumioWebhookInvalidSignature(t *testing.T) {
+	j := NewJumio(JumioConfig{APISecret: "real-secret"})
+	payload := []byte(`{"transactionReference":"txn-bad"}`)
+	wrongSig := jumioSign(payload, "wrong-secret")
+
+	_, err := j.ParseWebhook(payload, map[string]string{"Callback-Sig": wrongSig})
+	if err == nil {
+		t.Fatal("RED-14: invalid signature should be rejected")
+	}
+}
+
+// TestJumioWebhookMissingSignature (RED-14) verifies missing header is rejected.
+func TestJumioWebhookMissingSignature(t *testing.T) {
+	j := NewJumio(JumioConfig{APISecret: "some-secret"})
+	payload := []byte(`{"transactionReference":"txn-nosig"}`)
+
+	_, err := j.ParseWebhook(payload, map[string]string{})
+	if err == nil {
+		t.Fatal("RED-14: missing Callback-Sig header should be rejected")
 	}
 }
 
