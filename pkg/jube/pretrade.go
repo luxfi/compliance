@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -27,8 +29,14 @@ type PreTradeConfig struct {
 	AllowOnReview bool
 
 	// AllowOnError controls whether orders proceed if Jube is unreachable.
-	// Default: true (fail-open). Set false for fail-closed.
+	// RED-09: Default is now false (fail-closed). Fail-open is only permitted
+	// in environments explicitly listed in FailOpenEnvironments.
 	AllowOnError bool
+
+	// FailOpenEnvironments lists the ENVIRONMENT values where fail-open is
+	// permitted (e.g., "local", "localnet"). In all other environments,
+	// AllowOnError is forced to false regardless of config.
+	FailOpenEnvironments []string
 
 	// WebhookURL is the target for aml.flagged webhook events. Empty = no webhook.
 	WebhookURL string
@@ -56,14 +64,34 @@ type PreTradeScreen struct {
 }
 
 // NewPreTradeScreen creates a pre-trade screener using the given Jube client.
+// RED-09: AllowOnError is forced to false unless the current ENVIRONMENT
+// is in the FailOpenEnvironments list (e.g., "local", "localnet").
 func NewPreTradeScreen(client *Client, cfg PreTradeConfig) *PreTradeScreen {
 	if cfg.ModelID == 0 {
 		cfg.ModelID = 1 // default model
+	}
+	// Enforce fail-closed unless explicitly in a permitted environment.
+	if cfg.AllowOnError {
+		env := os.Getenv("ENVIRONMENT")
+		if !isFailOpenPermitted(env, cfg.FailOpenEnvironments) {
+			cfg.AllowOnError = false
+		}
 	}
 	return &PreTradeScreen{
 		client: client,
 		cfg:    cfg,
 	}
+}
+
+// isFailOpenPermitted checks if the current environment allows fail-open.
+func isFailOpenPermitted(env string, permitted []string) bool {
+	env = strings.ToLower(strings.TrimSpace(env))
+	for _, p := range permitted {
+		if strings.EqualFold(strings.TrimSpace(p), env) {
+			return true
+		}
+	}
+	return false
 }
 
 // Screen submits a transaction to Jube for AML/fraud scoring and returns

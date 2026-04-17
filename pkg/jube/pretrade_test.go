@@ -81,10 +81,15 @@ func TestScreenBlockHighRisk(t *testing.T) {
 }
 
 func TestScreenFailOpenOnError(t *testing.T) {
+	// RED-09: Fail-open requires both AllowOnError=true AND ENVIRONMENT in FailOpenEnvironments.
+	t.Setenv("ENVIRONMENT", "local")
 	screen, cleanup := newTestScreen(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"error":"internal"}`))
-	}, PreTradeConfig{AllowOnError: true})
+	}, PreTradeConfig{
+		AllowOnError:         true,
+		FailOpenEnvironments: []string{"local", "localnet"},
+	})
 	defer cleanup()
 
 	result := screen.Screen(context.Background(), ScreenRequest{
@@ -97,7 +102,7 @@ func TestScreenFailOpenOnError(t *testing.T) {
 	})
 
 	if !result.Allowed {
-		t.Fatal("expected allowed=true (fail-open) when Jube returns error")
+		t.Fatal("expected allowed=true (fail-open) when Jube returns error in local env")
 	}
 	if result.Action != PreTradeAllow {
 		t.Fatalf("action = %q, want %q", result.Action, PreTradeAllow)
@@ -157,4 +162,93 @@ func TestScreenDefaultModelID(t *testing.T) {
 	if screen.cfg.ModelID != 1 {
 		t.Fatalf("default ModelID = %d, want 1", screen.cfg.ModelID)
 	}
+}
+
+// TestPreTradeFailClosed (RED-09) verifies that when AML service errors,
+// the default behavior blocks the order (fail-closed).
+func TestPreTradeFailClosed(t *testing.T) {
+	t.Setenv("ENVIRONMENT", "production")
+	screen, cleanup := newTestScreen(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"internal"}`))
+	}, PreTradeConfig{
+		// AllowOnError not set — defaults to false (fail-closed).
+	})
+	defer cleanup()
+
+	result := screen.Screen(context.Background(), ScreenRequest{
+		AccountID: "acct-fail",
+		Symbol:    "AAPL",
+		Side:      "buy",
+		Qty:       "10",
+		Price:     "150",
+		Currency:  "USD",
+	})
+
+	if result.Allowed {
+		t.Fatal("RED-09: expected fail-closed (allowed=false) when AML errors in production")
+	}
+	if result.Action != PreTradeBlock {
+		t.Fatalf("action = %q, want %q", result.Action, PreTradeBlock)
+	}
+}
+
+// TestPreTradeFailOpenOnlyLocal (RED-09) verifies that fail-open is only
+// permitted when ENVIRONMENT matches FailOpenEnvironments.
+func TestPreTradeFailOpenOnlyLocal(t *testing.T) {
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"down"}`))
+	}
+
+	// Case 1: ENVIRONMENT=local with local in FailOpenEnvironments → fail-open
+	t.Run("local_permitted", func(t *testing.T) {
+		t.Setenv("ENVIRONMENT", "local")
+		screen, cleanup := newTestScreen(t, handler, PreTradeConfig{
+			AllowOnError:         true,
+			FailOpenEnvironments: []string{"local", "localnet"},
+		})
+		defer cleanup()
+
+		result := screen.Screen(context.Background(), ScreenRequest{
+			AccountID: "a1", Symbol: "AAPL", Side: "buy", Qty: "1", Price: "1", Currency: "USD",
+		})
+		if !result.Allowed {
+			t.Fatal("RED-09: expected fail-open in local environment")
+		}
+	})
+
+	// Case 2: ENVIRONMENT=dev with local-only FailOpenEnvironments → fail-closed
+	t.Run("dev_not_permitted", func(t *testing.T) {
+		t.Setenv("ENVIRONMENT", "dev")
+		screen, cleanup := newTestScreen(t, handler, PreTradeConfig{
+			AllowOnError:         true,
+			FailOpenEnvironments: []string{"local", "localnet"},
+		})
+		defer cleanup()
+
+		result := screen.Screen(context.Background(), ScreenRequest{
+			AccountID: "a2", Symbol: "AAPL", Side: "buy", Qty: "1", Price: "1", Currency: "USD",
+		})
+		if result.Allowed {
+			t.Fatal("RED-09: expected fail-closed in dev environment (not in FailOpenEnvironments)")
+		}
+	})
+
+	// Case 3: ENVIRONMENT=production, AllowOnError=true but no FailOpenEnvironments → fail-closed
+	t.Run("production_forced_closed", func(t *testing.T) {
+		t.Setenv("ENVIRONMENT", "production")
+		screen, cleanup := newTestScreen(t, handler, PreTradeConfig{
+			AllowOnError: true,
+			// FailOpenEnvironments empty → fail-closed everywhere
+		})
+		defer cleanup()
+
+		result := screen.Screen(context.Background(), ScreenRequest{
+			AccountID: "a3", Symbol: "AAPL", Side: "buy", Qty: "1", Price: "1", Currency: "USD",
+		})
+		if result.Allowed {
+			t.Fatal("RED-09: expected fail-closed in production (empty FailOpenEnvironments)")
+		}
+	})
 }
