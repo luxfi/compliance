@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/luxfi/compliance/pkg/aml"
-	"github.com/luxfi/compliance/pkg/idv"
+	"github.com/hanzoai/idv/provider"
 	"github.com/luxfi/compliance/pkg/kyc"
 	"github.com/luxfi/compliance/pkg/onboarding"
 	"github.com/luxfi/compliance/pkg/payments"

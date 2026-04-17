@@ -14,7 +14,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/luxfi/compliance/pkg/idv"
+	"github.com/hanzoai/idv/provider"
 )
 
 // mockProvider is a minimal idv.Provider for testing the Service layer.

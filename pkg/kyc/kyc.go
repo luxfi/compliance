@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/luxfi/compliance/pkg/idv"
+	"github.com/hanzoai/idv/provider"
 )
 
 // Verification tracks the state of a single verification attempt.
