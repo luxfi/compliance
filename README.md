@@ -1,13 +1,17 @@
 # Lux Compliance
 
-Regulated financial compliance stack: identity verification, KYC/AML, sanctions screening, transaction monitoring, payment compliance, and multi-jurisdiction regulatory frameworks.
+Regulated financial compliance stack: identity verification, KYC/AML, sanctions
+screening, transaction monitoring, payment compliance, and multi-jurisdiction
+regulatory frameworks. Standard library only — zero external Go deps.
 
-Zero external dependencies. Standard library only.
+```bash
+GOWORK=off go build -o complianced ./cmd/complianced/
+COMPLIANCE_API_KEY=… ./complianced
+```
 
-```
-go build -o complianced ./cmd/complianced/
-JUMIO_API_TOKEN=... COMPLIANCE_API_KEY=... ./complianced
-```
+Single source of truth for compliance domain logic. Consumed by
+[`luxfi/broker`](https://github.com/luxfi/broker) (HTTP layer) and
+[`luxfi/bank`](https://github.com/luxfi/bank) (customer apps + admin).
 
 ## Architecture
 
@@ -17,113 +21,155 @@ JUMIO_API_TOKEN=... COMPLIANCE_API_KEY=... ./complianced
                     │     :8091        │
                     └────────┬─────────┘
                              │
-        ┌────────────────────┼────────────────────┐
-        │                    │                    │
-  ┌─────┴─────┐       ┌─────┴─────┐       ┌─────┴─────┐
-  │    IDV    │       │    AML    │       │ Payments  │
-  │ Providers │       │ Screening │       │Compliance │
-  └─────┬─────┘       └─────┬─────┘       └─────┬─────┘
-        │                    │                    │
-   ┌────┼────┐          ┌───┼───┐           ┌───┼───┐
-   │    │    │          │   │   │           │   │   │
- Jumio Onfido Plaid   OFAC EU  PEP     Travel CTR  Stablecoin
-                       SDN  HMT           Rule      Validation
+        ┌────────────────────┼────────────────────────┐
+        │                    │                        │
+  ┌─────┴──────┐      ┌──────┴──────┐         ┌──────┴──────┐
+  │   IDV      │      │     AML     │         │  Payments   │
+  │ providers  │      │  screening  │         │ compliance  │
+  └──────┬─────┘      └──────┬──────┘         └──────┬──────┘
+         │                   │                       │
+   ┌─────┼─────┐    ┌────────┼────────┐    ┌─────────┼─────────┐
+ Jumio Onfido Plaid OFAC EU UK PEP Jube  Travel CTR  Stablecoin
+                                          Rule       Validation
+
+                  ┌──────────┬──────────┬──────────┐
+                  │ Regulatory framework (20 jurs) │
+                  │ ── 14 frameworks ──            │
+                  │ Entity types (13)              │
+                  │ Onboarding (5-step)            │
+                  │ Reporting + RBAC               │
+                  └──────────┴──────────┴──────────┘
 ```
 
-Extends the [hanzoai/iam](https://github.com/hanzoai/iam) `idv/` provider pattern. Consumed by [luxfi/broker](https://github.com/luxfi/broker) and [luxfi/bank](https://github.com/luxfi/bank).
+IDV providers come from [`hanzoai/idv`](https://github.com/hanzoai/idv) — the
+shared identity-verification interface used across Hanzo and Lux services.
+Compliance imports `idv.Provider` and registers each (`Jumio`, `Onfido`, `Plaid`).
 
 ## Packages
 
-### `pkg/idv` — Identity Verification Providers
+### `pkg/types` — Domain Types
 
-Provider interface with factory pattern. Each provider implements initiate, status check, and webhook parsing.
+Single source of truth for all status enums, models, and view types shared by
+broker, bank, and compliance. Status enums: `KYCStatus`, `KYBStatus`,
+`SessionStatus`, `AMLStatus`, `RiskLevel`, `ApplicationStatus`,
+`EnvelopeStatus`. Models: `Identity`, `Document`, `BusinessKYB`, `Pipeline`,
+`Session`, `Fund`, `Envelope`, `Transaction`, `Application`, `Role`,
+`Permission`, `User`.
 
-| Provider | API | Features |
-|----------|-----|----------|
-| Jumio | Netverify v4 | ID + selfie, liveness, document verification |
-| Onfido | v3.6 | Applicant, check, SDK token, watchlist screening |
-| Plaid | Identity Verification | Session-based IDV, bank-linked identity |
+### `pkg/store` — Storage Interface
 
-All providers support HMAC-SHA256 webhook signature validation.
+`ComplianceStore` interface with an in-memory implementation
+(`MemoryStore`). PostgreSQL backing schema in `migrations/001_initial.sql`.
 
 ### `pkg/kyc` — KYC Orchestration
 
-Full application lifecycle with multi-provider KYC verification.
+Multi-provider verification + application lifecycle. Uses
+[`hanzoai/idv`](https://github.com/hanzoai/idv) as the provider interface;
+each implementation (Jumio Netverify v4, Onfido v3.6, Plaid IDV) registers via
+`RegisterProvider`. HMAC-SHA256 webhook signature validation.
 
-**Application status flow:**
 ```
 draft → pending → pending_kyc → approved
                               → rejected
-```
 
-**KYC status flow:**
-```
 not_started → pending → verified
                       → failed
 ```
 
-Application model includes: identity, address, tax info, regulatory disclosures, employment, financial profile, account preferences, documents, and admin review fields.
+### `pkg/aml` — Sanctions Screening + Transaction Monitoring
 
-### `pkg/aml` — AML/Sanctions Screening & Transaction Monitoring
+Screening: OFAC SDN, EU consolidated, UK HM Treasury, PEP databases, adverse
+media. Match types: exact, fuzzy (Levenshtein), partial. Risk scoring: low,
+medium, high, critical.
 
-**Screening** checks applicants against:
-- OFAC SDN list (US Treasury)
-- EU consolidated sanctions
-- UK HM Treasury sanctions
-- PEP (Politically Exposed Persons) databases
-- Adverse media
+Transaction monitoring: single-tx amount limits, daily aggregates, velocity
+checks, geographic risk, structuring/smurfing detection. Alert lifecycle:
+open → investigating → escalated → closed/filed.
 
-Match types: exact, fuzzy (Levenshtein distance), partial. Risk scoring: low, medium, high, critical.
+### `pkg/jube` — Jube AML Sidecar Client
 
-**Transaction monitoring** rules engine:
-- Single transaction amount limits
-- Daily aggregate limits
-- Velocity checks (too many transactions in time window)
-- Geographic risk (high-risk country detection)
-- Structuring/smurfing pattern detection
-
-Alert lifecycle: open → investigating → escalated → closed/filed.
+HTTP client + webhooks for the [Jube](https://github.com/jube-suite/jube)
+real-time AML platform. Pre-trade screening, transaction risk scoring, model
+inference. Used as a sidecar alongside the in-process screening for
+high-throughput venues.
 
 ### `pkg/regulatory` — Multi-Jurisdiction Framework
 
-| Jurisdiction | Regulator | Key Requirements |
-|-------------|-----------|------------------|
-| USA | FinCEN, SEC, FINRA | BSA (CIP, CTR $10k+, SAR), suitability, accredited investor |
-| UK | FCA | Registration, 5AMLD CDD/EDD, HM Treasury sanctions |
-| Isle of Man | IOMFSA | Designated Business, AML/CFT Code 2019, source of wealth/funds |
+**20 jurisdictions, 14 regulatory frameworks.**
 
-Each jurisdiction defines: requirements, application validation rules, and transaction limits.
+| Framework | Code | Jurisdictions |
+|-----------|------|---------------|
+| US SEC + FINRA | `us_sec_finra` | US |
+| UK FCA | `uk_fca` | GB |
+| Isle of Man IOMFSA | `iom` | IM |
+| Canada CIRO | `ciro` | CA |
+| Brazil CVM | `cvm` | BR |
+| India SEBI | `sebi` | IN |
+| Singapore MAS | `mas` | SG |
+| Australia ASIC | `asic` | AU |
+| Switzerland FINMA | `finma` | CH |
+| UAE SCA | `sca` | AE |
+| Dubai DFSA | `dfsa` | AE-DIFC |
+| Abu Dhabi FSRA | `fsra` | AE-ADGM |
+| UAE VARA | `vara` | AE-VARA |
+| EU MiCA | `mica` | LU, DE, FR, NL, IE, IT, ES |
 
-### `pkg/payments` — Payment Compliance
-
-**Travel Rule** (FATF Recommendation 16): originator and beneficiary information required for transfers over $3,000.
-
-**CTR detection**: flags transactions at or above $10,000 for Currency Transaction Report filing.
-
-**Stablecoin validation**: token allowlists, per-jurisdiction policies, address risk scoring (chain analysis integration point).
+Each `Jurisdiction` defines: regulator, framework code, application validation
+rules, transaction limits, suitability tests, sanctions list selection.
 
 ### `pkg/entity` — Regulated Entity Types
 
-| Entity | Registration | Net Capital | Key Rules |
-|--------|-------------|-------------|-----------|
-| ATS | SEC Reg ATS, Form ATS-N | $250,000 | Rule 300-303 |
-| Broker-Dealer | SEC/FINRA/SIPC | $250,000 | Rule 15c3-1 |
-| Transfer Agent | SEC Rule 17Ad | $25,000 | Form TA-1/TA-2 |
-| MSB | FinCEN, state MTLs | Varies | CTR/SAR filing |
+**13 entity types** covering global market structure:
+
+| Code | Type | Notes |
+|------|------|-------|
+| `ats` | Alternative Trading System | SEC Reg ATS, Form ATS-N, Rule 300-303 |
+| `broker_dealer` | Broker-Dealer | SEC/FINRA/SIPC, Rule 15c3-1 |
+| `transfer_agent` | Transfer Agent | SEC Rule 17Ad, Form TA-1/TA-2 |
+| `msb` | Money Services Business | FinCEN, state MTLs, CTR/SAR |
+| `sicav` | SICAV (LU) | Luxembourg open-ended investment company |
+| `sicar` | SICAR (LU) | Luxembourg risk-capital investment vehicle |
+| `raif` | RAIF (LU) | Reserved Alternative Investment Fund |
+| `aifm` | AIFM | Alternative Investment Fund Manager |
+| `mancoman` | Management Company | LU/CH manco |
+| `crr` | CRR (CH) | Swiss capital-raising representative |
+| `issuer` | Issuer | Tokenized-security issuance |
+| `custodian` | Custodian | Qualified custodian |
+| `dlt_facility` | DLT Facility | DLT Pilot / DLT Foundation regimes |
+
+### `pkg/payments` — Payment Compliance
+
+**Travel Rule** (FATF Recommendation 16): originator/beneficiary required
+> $3,000. **CTR detection**: flags ≥ $10,000 for Currency Transaction Report.
+**Stablecoin validation**: token allowlists, per-jurisdiction policies, address
+risk scoring (chain-analysis integration point).
+
+### `pkg/onboarding` — 5-Step Investor Onboarding
+
+Pipeline-based onboarding with per-step session state. Steps: identity,
+verification (KYC), suitability, agreements (eSign), funding. Resumable, with
+admin review, document upload, and reg disclosures per jurisdiction.
+
+### `pkg/rbac` — Role-Based Access Control
+
+Default roles, permission set, module gating. Used by both the broker HTTP
+layer and the bank admin app.
+
+### `pkg/reporting` — Regulatory Reporting
+
+CTR, SAR, suspicious-activity, transaction reporting, audit log export.
+Per-framework formats.
 
 ### `pkg/webhook` — Unified Webhook Handler
 
-Routes incoming webhooks to the correct provider handler. Features:
-- HMAC-SHA256 signature validation per provider
-- Idempotency tracking (event deduplication)
-- Configurable retry with max attempts
-- Dead letter queue for failed webhooks
+Routes incoming webhooks to provider handlers. HMAC-SHA256 signature
+validation, idempotency tracking (event dedup), retry with max attempts, dead
+letter queue.
 
 ## API Reference
 
-Base URL: `http://localhost:8091/v1`
-
-Auth: `X-Api-Key` header (skip for `/healthz` and webhook endpoints).
+Base URL: `http://localhost:8091/v1` — `X-Api-Key` header required (skip for
+`/healthz` and webhook endpoints).
 
 ### Applications
 
@@ -133,38 +179,41 @@ Auth: `X-Api-Key` header (skip for `/healthz` and webhook endpoints).
 | GET | `/v1/applications/{id}` | Get application |
 | PATCH | `/v1/applications/{id}` | Update (draft save) |
 | POST | `/v1/applications/{id}/submit` | Submit for review |
-| GET | `/v1/applications` | List applications (`?status=`) |
-| GET | `/v1/applications/stats` | Application statistics |
+| GET | `/v1/applications` | List (`?status=`) |
+| GET | `/v1/applications/stats` | Statistics |
 
-### KYC Verification
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/v1/kyc/verify` | Initiate KYC verification |
-| GET | `/v1/kyc/status/{verificationId}` | Check verification status |
-| GET | `/v1/kyc/application/{applicationId}` | Verifications for application |
-| POST | `/v1/kyc/webhook/{provider}` | Receive provider webhooks (no auth) |
-
-### AML Screening
+### KYC
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/v1/aml/screen` | Screen individual against sanctions/PEP |
+| POST | `/v1/kyc/verify` | Initiate verification |
+| GET | `/v1/kyc/status/{verificationId}` | Status |
+| GET | `/v1/kyc/application/{applicationId}` | All for application |
+| POST | `/v1/kyc/webhook/{provider}` | Provider webhook (no auth) |
+
+### AML
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/v1/aml/screen` | Screen identity |
 | POST | `/v1/aml/monitor` | Monitor transaction |
-| GET | `/v1/aml/alerts` | List alerts (`?status=`) |
+| GET | `/v1/aml/alerts` | List (`?status=`) |
+| POST | `/v1/aml/jube/webhook` | Jube callback (no auth) |
 
-### Payments & Regulatory
+### Payments + Regulatory
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/v1/payments/validate` | Validate payin/payout compliance |
-| GET | `/v1/regulatory/{jurisdiction}` | Get jurisdiction requirements |
+| POST | `/v1/payments/validate` | Validate payin/payout |
+| GET | `/v1/regulatory/{jurisdiction}` | Jurisdiction requirements |
+| GET | `/v1/regulatory/frameworks` | List frameworks |
+| GET | `/v1/regulatory/frameworks/{code}` | Framework + jurisdictions |
 
 ### System
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/healthz` | Health check (no auth) |
+| GET | `/healthz` | Health (no auth) |
 | GET | `/v1/providers` | List registered IDV providers |
 
 ## Configuration
@@ -174,8 +223,11 @@ Auth: `X-Api-Key` header (skip for `/healthz` and webhook endpoints).
 | `COMPLIANCE_LISTEN` | `:8091` | HTTP listen address |
 | `COMPLIANCE_API_KEY` | — | API key for authenticated endpoints |
 | `KYC_DEFAULT_PROVIDER` | first registered | Default IDV provider |
+| `JUBE_BASE_URL` | — | Jube AML sidecar endpoint |
+| `JUBE_API_KEY` | — | Jube auth |
+| `DB_URL` | memory | PostgreSQL connection (production) |
 
-**IDV Provider credentials** — set for each provider:
+**IDV provider credentials:**
 
 | Provider | Variables |
 |----------|-----------|
@@ -186,102 +238,91 @@ Auth: `X-Api-Key` header (skip for `/healthz` and webhook endpoints).
 ## Build & Test
 
 ```bash
-make build          # Build binary
-make test           # Run tests (173 tests across 7 packages)
-make test-race      # Run with race detector (0 data races)
-make lint           # go vet
-make docker         # Build Docker image
-make docker-push    # Push to ghcr.io
+make build
+make test          # all packages
+make test-race     # with -race
+make lint          # go vet
+make docker        # ghcr.io/luxfi/compliance image
 ```
 
 ## Docker
 
 ```bash
-docker build --platform linux/amd64 -t ghcr.io/luxfi/compliance:latest .
 docker run -p 8091:8091 \
-  -e COMPLIANCE_API_KEY=your-key \
-  -e JUMIO_API_TOKEN=... \
-  -e JUMIO_API_SECRET=... \
+  -e COMPLIANCE_API_KEY=… \
+  -e JUMIO_API_TOKEN=… \
   ghcr.io/luxfi/compliance:latest
 ```
 
-Image: `ghcr.io/luxfi/compliance` — 6.8 MB, alpine-based, healthcheck on `/healthz`.
+Image: `ghcr.io/luxfi/compliance` — alpine, healthcheck on `/healthz`.
 
 ## Integration
 
-### Go (import as library)
+### Go (library)
 
 ```go
 import (
     "github.com/luxfi/compliance/pkg/kyc"
-    "github.com/luxfi/compliance/pkg/idv"
     "github.com/luxfi/compliance/pkg/aml"
+    "github.com/luxfi/compliance/pkg/regulatory"
+    "github.com/hanzoai/idv/provider"
 )
 
 svc := kyc.NewService()
-svc.RegisterProvider(idv.NewJumio(idv.JumioConfig{...}))
+svc.RegisterProvider(provider.NewJumio(provider.JumioConfig{…}))
+
+screener := aml.NewScreener(aml.DefaultConfig())
+result, _ := screener.Screen(ctx, identity)
+
+jur := regulatory.For("US")
+limits := jur.TransactionLimits()
 ```
 
 ### TypeScript (bank SDK)
 
-```typescript
+```ts
 import { ComplianceModule } from '@luxbank/compliance'
 
-// In NestJS app.module.ts
 ComplianceModule.forRoot({
-  baseUrl: process.env.COMPLIANCE_BASE_URL || 'http://compliance:8091',
-  apiKey: process.env.COMPLIANCE_API_KEY || '',
+  baseUrl: process.env.COMPLIANCE_BASE_URL ?? 'http://compliance:8091',
+  apiKey: process.env.COMPLIANCE_API_KEY ?? '',
 })
-
-// Inject anywhere
-constructor(private readonly compliance: ComplianceService) {}
-await compliance.initiateKYC(applicationId, 'jumio')
 ```
 
-The `@luxbank/compliance` TypeScript SDK lives in [luxfi/bank/pkg/compliance](https://github.com/luxfi/bank/tree/main/pkg/compliance).
+`@luxbank/compliance` lives in
+[luxfi/bank/pkg/compliance](https://github.com/luxfi/bank/tree/main/pkg/compliance).
 
 ## Project Structure
 
 ```
 compliance/
-├── cmd/complianced/        Standalone HTTP server
-├── pkg/
-│   ├── idv/                Identity verification providers
-│   │   ├── provider.go     Provider interface + registry
-│   │   ├── jumio.go        Jumio Netverify v4
-│   │   ├── onfido.go       Onfido v3.6
-│   │   └── plaid.go        Plaid Identity Verification
-│   ├── kyc/                KYC orchestration
-│   │   ├── kyc.go          Service (multi-provider, webhooks)
-│   │   └── application.go  Application model + store
-│   ├── aml/                AML compliance
-│   │   ├── screening.go    Sanctions/PEP screening
-│   │   └── monitoring.go   Transaction monitoring rules
-│   ├── regulatory/         Jurisdiction framework
-│   │   ├── jurisdiction.go Interface + factory
-│   │   ├── usa.go          FinCEN/SEC/FINRA rules
-│   │   ├── uk.go           FCA/5AMLD rules
-│   │   └── iom.go          IOMFSA rules
-│   ├── payments/           Payment compliance
-│   │   ├── compliance.go   Travel rule, CTR, validation
-│   │   └── stablecoin.go   Token policies, address risk
-│   ├── entity/             Regulated entity types
-│   │   └── entity.go       ATS, BD, TA, MSB definitions
-│   └── webhook/            Unified webhook handler
-│       └── handler.go      Routing, sig validation, idempotency
-├── Dockerfile
-├── Makefile
-└── go.mod                  Zero external dependencies
+├── cmd/complianced/   Standalone HTTP server
+├── migrations/        PostgreSQL schema
+└── pkg/
+    ├── types/         Status enums + domain models (single source of truth)
+    ├── store/         ComplianceStore interface + MemoryStore
+    ├── kyc/           Service + Application
+    ├── aml/           Screening + transaction monitoring
+    ├── jube/          Jube AML sidecar client
+    ├── regulatory/    20 jurisdictions, 14 frameworks
+    ├── entity/        13 regulated entity types
+    ├── payments/      Travel rule, CTR, stablecoin
+    ├── onboarding/    5-step flow
+    ├── rbac/          Roles + permissions
+    ├── reporting/     CTR/SAR/audit export
+    └── webhook/       Unified handler with idempotency
 ```
 
-## Related Projects
+## Related
 
 | Module | Purpose |
 |--------|---------|
-| [luxfi/broker](https://github.com/luxfi/broker) | Multi-venue trading router, settlement engine |
+| [hanzoai/idv](https://github.com/hanzoai/idv) | Shared identity-verification provider interface (Jumio/Onfido/Plaid) |
+| [luxfi/broker](https://github.com/luxfi/broker) | Multi-venue trading router, settlement |
 | [luxfi/bank](https://github.com/luxfi/bank) | Customer apps, payments, admin dashboard |
-| [hanzoai/iam](https://github.com/hanzoai/iam) | Identity and access management (base `idv/` pattern) |
-| [hanzoai/commerce](https://github.com/hanzoai/commerce) | Payment processors (Plaid Link, Braintree, Stripe) |
+| [hanzoai/iam](https://github.com/hanzoai/iam) | Identity and access management |
+| [hanzoai/commerce](https://github.com/hanzoai/commerce) | Payment processors |
+| [luxfi/security](https://github.com/luxfi/security) | Security stack (audits, formal verification, KMS, signing) |
 
 ## License
 
